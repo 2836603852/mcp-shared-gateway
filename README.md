@@ -148,6 +148,9 @@ Clients mount your `src/shim.mjs`. The gateway itself is started from the packag
 pnpm test                      # starts a gateway on a free port with a fixture server
 node bench/memory.mjs 5        # memory benchmark (downloads the public servers via npx)
 node tests/manual/long-call.mjs # a call longer than 300 s through the shim (takes ~5 min)
+# against the gateway of your config (they restart it / open browser windows):
+node tests/manual/lifecycle.mjs          # gateway outlives the client; shims reconnect after a restart
+node tests/manual/browser-sessions.mjs   # two sessions, two windows in the shared browser
 ```
 
 Issues and PRs are welcome. Please keep the shim dependency-free and add a test for behavior changes.

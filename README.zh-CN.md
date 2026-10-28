@@ -148,6 +148,9 @@ await import('mcp-shared-gateway/src/shim.mjs');
 pnpm test                      # 在空闲端口起一个网关，用测试桩服务验证
 node bench/memory.mjs 5        # 内存基准测试（会用 npx 下载公开服务）
 node tests/manual/long-call.mjs # 经 shim 跑一个超过 300 秒的调用（约 5 分钟）
+# 下面两个针对你配置里的网关运行（会重启网关 / 打开浏览器窗口）：
+node tests/manual/lifecycle.mjs          # 客户端退出后网关仍在；网关重启后 shim 自动重连
+node tests/manual/browser-sessions.mjs   # 两个会话在共享浏览器里各用一个窗口
 ```
 
 欢迎提 Issue 和 PR。请保持 shim 不引入依赖；改动行为时请补上测试。
