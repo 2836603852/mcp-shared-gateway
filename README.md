@@ -81,7 +81,7 @@ Anything that takes `mcpServers` JSON (Cursor, Claude Desktop, …):
 | `servers.<name>.url` / `headers` | A remote Streamable HTTP server. |
 | `servers.<name>.cwd` | `"key"`: one instance per working directory; `"required"`: callers must pass `cwd`. `cwdArgs` may use `${CWD}`. |
 | `servers.<name>.description` / `hint` | Shown to the agent in `list` and in the gateway instructions. |
-| `servers.<name>.browser` | Attach to the shared Chrome; each session gets its own window, selected for it (for `chrome-devtools-mcp`; from 1.12 on pass `--no-page-id-routing`, otherwise every page tool requires a `pageId`). |
+| `servers.<name>.browser` | Attach to the shared Chrome; each session gets its own window, selected for it, and `new_page` opens tabs in that window (Chrome itself would put them in whichever window was active last). The browser starts without a window of its own. Meant for `chrome-devtools-mcp`; from 1.12 on pass `--no-page-id-routing`, otherwise every page tool requires a `pageId`. |
 | `servers.<name>.version` | Shown in `list`. The tool list is cached per server; change `version` when you upgrade a backend so the cache is refreshed. |
 
 `${NAME}` anywhere in the config is filled from `.local/secrets.json`, then from the environment, so keys stay out of the config.
@@ -118,7 +118,7 @@ To update: `git pull --ff-only`, then `node src/cli.mjs stop` when no session is
 
 - **shim** (`src/shim.mjs`): the stdio server each client mounts. It has no MCP SDK dependency, answers `initialize` and `tools/list` itself, and forwards tool calls to the gateway over localhost HTTP. If the gateway is not running, the shim starts it. On Windows it uses WMI, so the gateway is outside the client's process tree and outlives it.
 - **gateway** (`src/gateway.mjs`): starts backends on first use. An instance is identified by server name + owner (or `*` when shared) + directory (when keyed by `cwd`). It caches tool lists, so `list` and `describe` don't start anything, and it stops idle backends.
-- **Sessions end cleanly.** When a client exits, its shim tells the gateway, which stops that session's `owner` instances (and closes its browser window) right away. Idle instances are still stopped after `idleMinutes`.
+- **Sessions end cleanly.** When a client exits, its shim tells the gateway, which stops that session's `owner` instances (and closes its browser window with all its tabs) right away. Idle instances are still stopped after `idleMinutes`.
 - **Stuck backends recover.** A timed-out call usually keeps running in the backend, and calls on an `owner` instance run in order, so one stuck call makes the next ones time out too. After two timeouts in a row the gateway replaces that session's instance. The error text tells the agent what happened.
 - **Read-only meta-tools are marked as such** (MCP tool annotations), so clients with approvals turned off, such as Codex, can run `list`, `describe`, `status` and `resource` without asking. `describe` also shows the backend tool's own annotations.
 - Requests need a random Bearer token stored in `.local/token`, and the gateway only listens on `127.0.0.1`.

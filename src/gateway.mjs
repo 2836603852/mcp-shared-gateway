@@ -114,7 +114,8 @@ const browser = {
     if (!this.starting) {
       this.starting = (async () => {
         fs.mkdirSync(B.userDataDir, { recursive: true });
-        const args = [`--remote-debugging-port=${B.port}`, `--user-data-dir=${B.userDataDir}`, ...(B.args || [])];
+        // No startup window: nobody owns it, so it would stay open next to the session windows.
+        const args = [`--remote-debugging-port=${B.port}`, `--user-data-dir=${B.userDataDir}`, '--no-startup-window', ...(B.args || [])];
         let spawnError = null;
         const p = spawn(B.executable, args, { detached: true, stdio: 'ignore', env: cleanEnv(G) });
         p.on('error', err => { spawnError = err; });
@@ -142,52 +143,133 @@ const browser = {
         : '');
     }));
   },
-  async cdp(method, params) {
+  // One browser-level CDP connection for fn(send); send(method, params, sessionId?) resolves with the result.
+  async session(fn, ms = 10_000) {
     const v = await this.info();
     if (!v) throw new Error('Shared browser is not running');
-    return new Promise((resolve, reject) => {
-      const ws = new WebSocket(v.webSocketDebuggerUrl);
-      const timer = setTimeout(() => { try { ws.close(); } catch {} reject(new Error(`CDP ${method} timed out`)); }, 10_000);
-      ws.onopen = () => ws.send(JSON.stringify({ id: 1, method, params }));
-      ws.onmessage = ev => {
-        const m = JSON.parse(ev.data);
-        if (m.id !== 1) return;
-        clearTimeout(timer);
-        ws.close();
-        if (m.error) reject(new Error(m.error.message));
-        else resolve(m.result);
-      };
-      ws.onerror = e => { clearTimeout(timer); reject(new Error(`CDP connection failed: ${e.message || e.type}`)); };
+    const ws = new WebSocket(v.webSocketDebuggerUrl);
+    const waiting = new Map();
+    let nextId = 0;
+    ws.onmessage = ev => {
+      const m = JSON.parse(ev.data);
+      const w = waiting.get(m.id);
+      if (!w) return;
+      waiting.delete(m.id);
+      if (m.error) w.reject(new Error(`${w.method}: ${m.error.message}`));
+      else w.resolve(m.result);
+    };
+    const send = (method, params, sessionId) => new Promise((resolve, reject) => {
+      const id = ++nextId;
+      waiting.set(id, { resolve, reject, method });
+      ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
     });
+    const broken = new Promise((_, reject) => {
+      ws.onerror = e => reject(new Error(`CDP connection failed: ${e.message || e.type}`));
+      ws.onclose = () => reject(new Error('CDP connection closed'));
+    });
+    broken.catch(() => {});
+    try {
+      await withTimeout(Promise.race([new Promise(resolve => { ws.onopen = resolve; }), broken]), ms, 'CDP connection timed out');
+      return await withTimeout(Promise.race([fn(send), broken]), ms, 'CDP call timed out');
+    } finally {
+      try { ws.close(); } catch {}
+    }
+  },
+  cdp(method, params) {
+    return this.session(send => send(method, params));
   },
   async openWindow(marker) {
     const r = await this.cdp('Target.createTarget', { url: `about:blank#${marker}`, newWindow: true });
-    return r.targetId;
+    const { windowId } = await this.cdp('Browser.getWindowForTarget', { targetId: r.targetId });
+    return { targetId: r.targetId, windowId };
+  },
+  // Page targets in a window, the given target first if it is still there.
+  pagesIn(windowId, first) {
+    return this.session(async send => {
+      const { targetInfos } = await send('Target.getTargets');
+      const ids = targetInfos.filter(t => t.type === 'page').map(t => t.targetId).sort((a, b) => (b === first) - (a === first));
+      const wins = await Promise.all(ids.map(targetId => send('Browser.getWindowForTarget', { targetId }).then(r => r.windowId, () => null)));
+      return ids.filter((_, i) => wins[i] === windowId);
+    });
+  },
+  // Open url as a background tab next to page `opener`. Target.createTarget cannot pick a window (Chrome puts
+  // the tab in the last active one, often another session's), but a modified link click stays in its window.
+  clickOpen(opener, url) {
+    const mod = process.platform === 'darwin' ? 'metaKey' : 'ctrlKey';
+    const expression = `(() => { const a = document.createElement('a'); a.href = ${JSON.stringify(url)}; a.rel = 'noopener';
+      const root = document.documentElement; root.appendChild(a);
+      try { a.dispatchEvent(new MouseEvent('click', { ${mod}: true, cancelable: true })); } finally { a.remove(); } })()`;
+    return this.session(async send => {
+      const { sessionId } = await send('Target.attachToTarget', { targetId: opener, flatten: true });
+      try {
+        const r = await send('Runtime.evaluate', { expression, userGesture: true }, sessionId);
+        if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
+      } finally {
+        await send('Target.detachFromTarget', { sessionId }).catch(() => {});
+      }
+    }, 5000);
   },
   async closeTarget(id) {
     try {
       await fetch(`http://127.0.0.1:${B.port}/json/close/${id}`, { signal: AbortSignal.timeout(3000) });
     } catch {}
   },
+  // A session's window goes away with all its tabs, not only the one the gateway opened.
+  async closeWindow(inst) {
+    const ids = inst.windowId != null ? await this.pagesIn(inst.windowId, inst.windowTarget).catch(() => []) : [];
+    await Promise.all([...new Set([inst.windowTarget, ...ids])].map(id => this.closeTarget(id)));
+  },
 };
 
 // Give an owner its own window and make its chrome-devtools-mcp instance select it (without stealing focus).
 async function setupWindow(inst) {
   const marker = `gw-${crypto.randomBytes(4).toString('hex')}`;
-  inst.windowTarget = await browser.openWindow(marker);
+  const win = await browser.openWindow(marker);
+  inst.windowTarget = win.targetId;
+  inst.windowId = win.windowId;
+  const pageId = await findPageId(inst.mcp, marker);
+  if (pageId == null) throw new Error('New window did not show up in list_pages');
+  await inst.mcp.callTool({ name: 'select_page', arguments: { pageId, bringToFront: false } }, undefined, { timeout: 30_000 });
+  inst.windowPageId = pageId;
+}
+
+// The chrome-devtools-mcp page id of the page whose URL contains marker.
+async function findPageId(mcp, marker) {
   for (let i = 0; i < 15; i++) {
-    const r = await inst.mcp.callTool({ name: 'list_pages', arguments: {} }, undefined, { timeout: 30_000 });
+    const r = await mcp.callTool({ name: 'list_pages', arguments: {} }, undefined, { timeout: 30_000 });
     const text = (r.content || []).map(c => c.text || '').join('\n');
     const line = text.split('\n').find(l => l.includes(marker));
     const m = line && line.match(/^(\d+):/);
-    if (m) {
-      await inst.mcp.callTool({ name: 'select_page', arguments: { pageId: Number(m[1]), bringToFront: false } }, undefined, { timeout: 30_000 });
-      inst.windowPageId = Number(m[1]);
-      return;
-    }
+    if (m) return Number(m[1]);
     await sleep(300);
   }
-  throw new Error('New window did not show up in list_pages');
+  return null;
+}
+
+// new_page in the session's own window: open a marked tab from one of the window's pages, select it, then
+// navigate it. Returns null (and the caller falls back to the backend's new_page) when that is not possible.
+async function newPageInWindow(inst, mcp, a, timeoutMs) {
+  if (inst.windowId == null || a.isolatedContext !== undefined || typeof a.url !== 'string') return null;
+  const [opener] = await browser.pagesIn(inst.windowId, inst.windowTarget).catch(() => []);
+  if (!opener) return null;
+  const marker = `gw-tab-${crypto.randomBytes(4).toString('hex')}`;
+  try {
+    await browser.clickOpen(opener, `about:blank#${marker}`);
+  } catch (err) {
+    pushError(`${inst.name}.new_page`, err);
+    return null;
+  }
+  const pageId = await findPageId(mcp, marker);
+  if (pageId == null) {
+    pushError(`${inst.name}.new_page`, `tab ${marker} did not show up in list_pages`);
+    return null;
+  }
+  await mcp.callTool({ name: 'select_page', arguments: { pageId, bringToFront: !a.background } }, undefined, { timeout: 30_000 });
+  const nav = { type: 'url', url: a.url, ...(a.timeout ? { timeout: a.timeout } : {}) };
+  const r = await mcp.callTool({ name: 'navigate_page', arguments: nav }, undefined,
+    { timeout: timeoutMs, resetTimeoutOnProgress: true, maxTotalTimeout: G.maxTimeoutSec * 1000 });
+  const note = { type: 'text', text: `Opened as page ${pageId}, a new tab in this session's window, and selected it.` };
+  return { ...r, content: [note, ...(r.content || [])] };
 }
 
 // ---------- backend instances ----------
@@ -242,7 +324,7 @@ async function createInstance(name, def, key, ctx, cwd, { catalogOnly = false } 
   const inst = {
     key, name, owner: ctx.owner, client: ctx.client, cwd, mcp, transport,
     startedAt: Date.now(), lastUsed: Date.now(), busy: 0, chain: Promise.resolve(),
-    serial: def.scope === 'owner', closed: false, pid: null, windowTarget: null, browserWs,
+    serial: def.scope === 'owner', closed: false, pid: null, windowTarget: null, windowId: null, browserWs,
   };
   mcp.onclose = () => onClosed(inst, 'backend connection closed');
   try {
@@ -270,7 +352,7 @@ function onClosed(inst, reason) {
   if (inst.closed) return;
   inst.closed = true;
   if (instances.get(inst.key) === inst) instances.delete(inst.key);
-  if (inst.windowTarget) browser.closeTarget(inst.windowTarget);
+  if (inst.windowTarget) browser.closeWindow(inst);
   log('instance.closed', { server: inst.name, owner: inst.owner, reason });
 }
 
@@ -278,7 +360,7 @@ async function closeInstance(inst, reason) {
   if (inst.closed) return;
   inst.closed = true;
   if (instances.get(inst.key) === inst) instances.delete(inst.key);
-  if (inst.windowTarget) await browser.closeTarget(inst.windowTarget);
+  if (inst.windowTarget) await browser.closeWindow(inst);
   await killTree(inst.pid);
   try { await inst.mcp.close(); } catch {}
   log('instance.stop', { server: inst.name, owner: inst.owner, reason });
@@ -490,9 +572,13 @@ async function handleMeta(name, args, ctx) {
       let started = t0;
       const entry = () => ({ owner: ctx.owner, server: args.server, tool: args.tool, ms: Date.now() - started, queuedMs: started - t0, timeoutSec: sec });
       try {
-        const result = await runOn(inst, mcp => {
+        const result = await runOn(inst, async mcp => {
           started = Date.now();
           inst.lastTool = args.tool;
+          if (def.browser && args.tool === 'new_page') {
+            const r = await newPageInWindow(inst, mcp, args.arguments || {}, sec * 1000);
+            if (r) return r;
+          }
           return mcp.callTool(
             { name: args.tool, arguments: args.arguments || {} },
             undefined,

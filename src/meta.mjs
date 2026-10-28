@@ -14,7 +14,7 @@ Conventions:
 - If a write operation times out or its result is unclear, check the target state before retrying.
 - Idle backends are stopped after a while and restart automatically on the next call.`;
 
-const BROWSER = `- Browser servers attach to one shared browser (shared logins). Each session gets its own window, preselected for it. Work only in your own window and pages: open new pages in the background, never close or navigate other sessions' pages, and close the pages you opened when done.`;
+const BROWSER = `- Browser servers attach to one shared browser (shared logins). Each session gets its own window, preselected for it; keep all your pages in that one window as tabs. Reuse the current tab (navigate) when the old page is no longer needed; for pages that must stay open side by side use new_page with background: true, which the gateway opens as a tab in your window and selects. Do not open other windows (isolated contexts open one; use them only when a separate login state is required). Switch between your tabs with select_page, never close, navigate or select other sessions' pages, and close the tabs you opened when done.`;
 
 // gateway.instructions / instructionsFile replace the built-in text (e.g. to write it in another language
 // or add machine-specific rules); server hints are appended either way.

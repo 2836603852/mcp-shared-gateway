@@ -81,7 +81,7 @@ args = ["/path/to/mcp-shared-gateway/src/shim.mjs"]
 | `servers.<名>.url` / `headers` | 远程 Streamable HTTP 服务。 |
 | `servers.<名>.cwd` | `"key"`：每个工作目录一个实例；`"required"`：调用时必须传 `cwd`。`cwdArgs` 里可以用 `${CWD}`。 |
 | `servers.<名>.description` / `hint` | 会显示给 agent，出现在 `list` 结果和网关说明里。 |
-| `servers.<名>.browser` | 连接共享 Chrome，每个会话一个独立窗口并预先选中（配合 `chrome-devtools-mcp` 使用；1.12 起要加 `--no-page-id-routing`，否则每个页面工具都要求传 `pageId`）。 |
+| `servers.<名>.browser` | 连接共享 Chrome，每个会话一个独立窗口并预先选中，`new_page` 新开的标签页也放在这个窗口里（Chrome 默认会放进最近激活的窗口）。浏览器启动时不自带窗口。配合 `chrome-devtools-mcp` 使用；1.12 起要加 `--no-page-id-routing`，否则每个页面工具都要求传 `pageId`。 |
 | `servers.<名>.version` | 显示在 `list` 里。工具清单按服务缓存；升级后端时改一下 `version`，缓存就会刷新。 |
 
 配置里任何位置都可以写 `${NAME}`。它先从 `.local/secrets.json` 取值，取不到再读环境变量，这样密钥不用写进配置文件。
@@ -118,7 +118,7 @@ Windows 上可以用 `mcpx.cmd` 代替 `node src/cli.mjs`。
 
 - **shim**（`src/shim.mjs`）：每个客户端挂的就是它。它不依赖 MCP SDK，`initialize` 和 `tools/list` 自己直接应答，工具调用通过本机 HTTP 转发给网关。网关没在运行时，shim 会把它拉起来。在 Windows 上是用 WMI 拉起的，所以网关不在客户端的进程树里，客户端退出也不会带走它。
 - **网关**（`src/gateway.mjs`）：后端在第一次被用到时才启动。一个实例由三部分确定：服务名、owner（共享服务用 `*`）、工作目录（只有按 `cwd` 区分的服务才算）。网关会缓存各服务的工具清单，所以 `list` 和 `describe` 不会启动后端；后端闲置超时后由网关关掉。
-- **会话结束即回收。** 客户端退出时，shim 会通知网关，网关立刻停掉这个会话的 `owner` 实例（并关掉它的浏览器窗口）。闲置的实例仍按 `idleMinutes` 回收。
+- **会话结束即回收。** 客户端退出时，shim 会通知网关，网关立刻停掉这个会话的 `owner` 实例（并关掉它的浏览器窗口及其中所有标签页）。闲置的实例仍按 `idleMinutes` 回收。
 - **后端卡住能自动恢复。** 调用超时后，后端通常还在执行它；`owner` 实例上的调用又是按顺序执行的，所以一次卡住会让后面的调用跟着超时。连续超时两次后，网关会换掉这个会话的实例，并在报错里告诉 agent 发生了什么。
 - **只读元工具带有标注**（MCP tool annotations），关闭了审批的客户端（比如 Codex）调用 `list`、`describe`、`status`、`resource` 时不会再要求确认。`describe` 也会显示后端工具自己的标注。
 - 网关只监听 `127.0.0.1`，每个请求都要带 Bearer 令牌。令牌是随机生成的，存在 `.local/token`。
