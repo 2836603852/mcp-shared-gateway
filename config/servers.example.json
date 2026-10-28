@@ -1,0 +1,33 @@
+{
+  "gateway": {
+    "port": 18760,
+    "idleMinutes": 15
+  },
+  "browser": {
+    "executable": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "userDataDir": "C:\\chrome-mcp-profile",
+    "port": 9333,
+    "args": ["--no-first-run", "--no-default-browser-check"]
+  },
+  "servers": {
+    "chrome-devtools": {
+      "description": "Browser automation and debugging in the shared Chrome; each session gets its own window.",
+      "scope": "owner",
+      "browser": true,
+      "command": "npx",
+      "args": ["-y", "chrome-devtools-mcp@latest", "--browserUrl", "http://127.0.0.1:9333"]
+    },
+    "filesystem": {
+      "description": "Read and write files under the allowed directory.",
+      "scope": "shared",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:\\work"]
+    },
+    "context7": {
+      "description": "Up-to-date docs and examples for libraries and frameworks.",
+      "scope": "shared",
+      "url": "https://mcp.context7.com/mcp",
+      "headers": { "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}" }
+    }
+  }
+}

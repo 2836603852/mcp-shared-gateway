@@ -1,0 +1,25 @@
+{
+  "name": "mcp-shared-gateway",
+  "version": "0.1.0",
+  "description": "One local MCP gateway for all your AI agents: backend MCP servers are started once, shared across sessions, and stopped when idle.",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "mcpx": "src/cli.mjs"
+  },
+  "scripts": {
+    "gateway": "node src/gateway.mjs",
+    "shim": "node src/shim.mjs",
+    "cli": "node src/cli.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "bench": "node bench/memory.mjs"
+  },
+  "keywords": ["mcp", "model-context-protocol", "gateway", "agents", "claude", "codex"],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2"
+  }
+}
