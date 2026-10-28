@@ -15,7 +15,7 @@
       "scope": "owner",
       "browser": true,
       "command": "npx",
-      "args": ["-y", "chrome-devtools-mcp@latest", "--browserUrl", "http://127.0.0.1:9333"]
+      "args": ["-y", "chrome-devtools-mcp@latest", "--browserUrl", "http://127.0.0.1:9333", "--no-page-id-routing"]
     },
     "filesystem": {
       "description": "Read and write files under the allowed directory.",

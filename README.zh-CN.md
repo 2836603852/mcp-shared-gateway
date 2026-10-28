@@ -81,7 +81,7 @@ args = ["/path/to/mcp-shared-gateway/src/shim.mjs"]
 | `servers.<名>.url` / `headers` | 远程 Streamable HTTP 服务。 |
 | `servers.<名>.cwd` | `"key"`：每个工作目录一个实例；`"required"`：调用时必须传 `cwd`。`cwdArgs` 里可以用 `${CWD}`。 |
 | `servers.<名>.description` / `hint` | 会显示给 agent，出现在 `list` 结果和网关说明里。 |
-| `servers.<名>.browser` | 连接共享 Chrome，每个会话一个独立窗口（配合 `chrome-devtools-mcp` 使用）。 |
+| `servers.<名>.browser` | 连接共享 Chrome，每个会话一个独立窗口并预先选中（配合 `chrome-devtools-mcp` 使用；1.12 起要加 `--no-page-id-routing`，否则每个页面工具都要求传 `pageId`）。 |
 | `servers.<名>.version` | 显示在 `list` 里。工具清单按服务缓存；升级后端时改一下 `version`，缓存就会刷新。 |
 
 配置里任何位置都可以写 `${NAME}`。它先从 `.local/secrets.json` 取值，取不到再读环境变量，这样密钥不用写进配置文件。

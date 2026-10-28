@@ -81,7 +81,7 @@ Anything that takes `mcpServers` JSON (Cursor, Claude Desktop, …):
 | `servers.<name>.url` / `headers` | A remote Streamable HTTP server. |
 | `servers.<name>.cwd` | `"key"`: one instance per working directory; `"required"`: callers must pass `cwd`. `cwdArgs` may use `${CWD}`. |
 | `servers.<name>.description` / `hint` | Shown to the agent in `list` and in the gateway instructions. |
-| `servers.<name>.browser` | Attach to the shared Chrome; each session gets its own window (for `chrome-devtools-mcp`). |
+| `servers.<name>.browser` | Attach to the shared Chrome; each session gets its own window, selected for it (for `chrome-devtools-mcp`; from 1.12 on pass `--no-page-id-routing`, otherwise every page tool requires a `pageId`). |
 | `servers.<name>.version` | Shown in `list`. The tool list is cached per server; change `version` when you upgrade a backend so the cache is refreshed. |
 
 `${NAME}` anywhere in the config is filled from `.local/secrets.json`, then from the environment, so keys stay out of the config.

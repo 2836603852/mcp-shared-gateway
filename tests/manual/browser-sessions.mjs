@@ -50,4 +50,5 @@ for (const [owner, url] of Object.entries(pages)) {
 const [wa, wb] = [await windowOf(pages.A), await windowOf(pages.B)];
 check(wa !== null && wb !== null && wa !== wb, `sessions use different windows (${wa}, ${wb})`);
 for (const owner of Object.keys(pages)) await cli('reset', server, '--owner', run(owner));
+if (!failed) fs.rmSync(out, { recursive: true, force: true });
 process.exit(failed ? 1 : 0);
