@@ -22,7 +22,10 @@ function load(config, files = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-shared-gateway-config-'));
   try {
     fs.writeFileSync(path.join(dir, 'servers.json'), JSON.stringify(config));
-    for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), text);
+    for (const [name, text] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
+      fs.writeFileSync(path.join(dir, name), text);
+    }
     const script = `const c = await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'src', 'common.mjs')).href)});
 const m = await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'src', 'meta.mjs')).href)});
 const cfg = c.loadConfig();
@@ -64,4 +67,11 @@ test('instructions as an array of lines; ${CWD}/${CLIENT} are left for the gatew
   assert.equal(r.instructions, 'line 1\nline 2');
   assert.deepEqual(r.servers.c.args, ['${CWD}', 's3']);
   assert.equal(r.servers.c.clientEnv.K, '${CLIENT}');
+});
+
+test('${NAME} comes from state/secrets.json before the environment; unknown names stay as they are', () => {
+  const r = load({
+    servers: { d: { scope: 'shared', url: 'http://x', headers: { A: '${GW_TEST_SECRET}', B: '${FROM_FILE}', C: '${NOT_SET_ANYWHERE}' } } },
+  }, { 'state/secrets.json': JSON.stringify({ GW_TEST_SECRET: 'from-file', FROM_FILE: 'f' }) });
+  assert.deepEqual(r.servers.d.headers, { A: 'from-file', B: 'f', C: '${NOT_SET_ANYWHERE}' });
 });

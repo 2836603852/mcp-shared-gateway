@@ -48,13 +48,33 @@ function withTimeout(promise, ms, message) {
   ]).finally(() => clearTimeout(timer));
 }
 
-function killTree(pid) {
-  if (!pid) return Promise.resolve();
+// Backends are not started in their own process group, and launchers like npx leave the real server as a
+// grandchild, so the whole tree is collected first (ps on POSIX, taskkill /T on Windows).
+function descendants(pid) {
+  return new Promise(resolve => execFile('ps', ['-A', '-o', 'pid=,ppid='], (err, out) => {
+    if (err) return resolve([]);
+    const children = new Map();
+    for (const line of String(out).trim().split('\n')) {
+      const [p, pp] = line.trim().split(/\s+/).map(Number);
+      if (!children.has(pp)) children.set(pp, []);
+      children.get(pp).push(p);
+    }
+    const all = [];
+    for (const stack = [pid]; stack.length;) {
+      for (const c of children.get(stack.pop()) || []) { all.push(c); stack.push(c); }
+    }
+    resolve(all);
+  }));
+}
+
+async function killTree(pid) {
+  if (!pid) return;
   if (process.platform === 'win32') {
     return new Promise(resolve => execFile('taskkill', ['/T', '/F', '/PID', String(pid)], { windowsHide: true }, () => resolve()));
   }
-  try { process.kill(-pid, 'SIGTERM'); } catch { try { process.kill(pid, 'SIGTERM'); } catch {} }
-  return Promise.resolve();
+  for (const p of [pid, ...(await descendants(pid))]) {
+    try { process.kill(p, 'SIGTERM'); } catch {}
+  }
 }
 
 const tmpl = (s, vars) => (typeof s === 'string' ? s.replace(/\$\{(CWD|CLIENT)\}/g, (_, k) => vars[k] ?? '') : s);
@@ -182,10 +202,13 @@ function resolveCwd(def, args) {
   return cwd;
 }
 
+// Paths differ only by case on Windows and (by default) macOS; Linux keeps them apart.
+const caseFold = p => (process.platform === 'win32' || process.platform === 'darwin' ? p.toLowerCase() : p);
+
 // The key decides sharing: owner-scoped servers include the caller, shared ones use '*' for everybody.
 function instanceKey(name, def, ctx, cwd) {
   const who = def.scope === 'owner' ? ctx.owner : '*';
-  const where = def.cwd === 'key' || def.cwd === 'required' ? (cwd || '').toLowerCase() : '';
+  const where = def.cwd === 'key' || def.cwd === 'required' ? caseFold(cwd || '') : '';
   return `${name}|${who}|${where}`;
 }
 
@@ -300,10 +323,13 @@ function runOn(inst, fn) {
 }
 
 // ---------- tool catalog cache ----------
-// list/describe are answered from this cache, so browsing tools does not start any backend.
+// list/describe are answered from this cache, so browsing tools does not start any backend. The cache is
+// refreshed when anything that can change the tool list changes; a backend updated in place (npx @latest)
+// is not detected, so bump `version` after upgrading it.
 const catalogFile = name => path.join(CATALOG_DIR, `${name}.json`);
 const catalogHash = def => crypto.createHash('sha1')
-  .update(JSON.stringify({ c: def.command, a: def.args, u: def.url, v: def.version })).digest('hex').slice(0, 12);
+  .update(JSON.stringify({ c: def.command, a: def.args, u: def.url, v: def.version, e: def.env, ca: def.cwdArgs, ce: def.clientEnv, h: def.headers }))
+  .digest('hex').slice(0, 12);
 
 function readCatalog(name, def) {
   try {

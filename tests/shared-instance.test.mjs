@@ -50,6 +50,7 @@ before(async () => {
       'shared-echo': { description: 'fixture', scope: 'shared', ...echo },
       'owner-echo': { description: 'fixture', scope: 'owner', ...echo },
       'client-echo': { description: 'fixture', scope: 'owner', ...echo, clientEnv: { GW_TEST_CLIENT: '${CLIENT}' } },
+      'dir-echo': { description: 'fixture', scope: 'shared', cwd: 'key', cwdArgs: ['--dir', '${CWD}'], ...echo },
     },
   }));
   gateway = spawn(process.execPath, [path.join(ROOT, 'src', 'gateway.mjs')], {
@@ -123,6 +124,33 @@ test('long text results are written to gateway.outputDir', async () => {
   const file = r.match(/written to (.+)\]$/)?.[1];
   assert.ok(file && path.dirname(file) === path.join(state, 'spilled'), r.slice(-200));
   assert.equal(fs.readFileSync(file, 'utf8').length, 5000);
+});
+
+test('cwd "key": one instance per directory, ${CWD} filled into cwdArgs', async () => {
+  const a = await connect('h');
+  const [d1, d2] = ['d1', 'd2'].map(d => fs.mkdirSync(path.join(state, d), { recursive: true }) || path.join(state, d));
+  const run = async (tool, cwd) => text(await a.callTool({ name: 'call', arguments: { server: 'dir-echo', tool, cwd } }));
+  const [p1, p2, p1again] = [await run('pid', d1), await run('pid', d2), await run('pid', d1)];
+  assert.equal(p1, p1again);
+  assert.notEqual(p1, p2);
+  assert.deepEqual(JSON.parse(await run('argv', d2)), ['--dir', d2]);
+});
+
+const alive = pid => { try { process.kill(pid, 0); return true; } catch (err) { return err.code === 'EPERM'; } };
+
+test('reset stops the session\'s instance together with the processes it started', async () => {
+  const a = await connect('i');
+  const server = await pidOf(a, 'owner-echo');
+  const child = Number(text(await a.callTool({ name: 'call', arguments: { server: 'owner-echo', tool: 'spawn_child' } })));
+  assert.ok(alive(child));
+  assert.match(text(await a.callTool({ name: 'reset', arguments: { server: 'owner-echo' } })), /Stopped 1 /);
+  for (let i = 0; i < 20 && (alive(server) || alive(child)); i++) await sleep(250);
+  assert.equal(alive(server), false, 'backend still running');
+  assert.equal(alive(child), false, 'backend child still running');
+});
+
+test('token file is private to its owner', { skip: process.platform === 'win32' && 'POSIX permissions' }, () => {
+  assert.equal(fs.statSync(path.join(state, 'token')).mode & 0o077, 0);
 });
 
 test('idle backends are stopped', async () => {

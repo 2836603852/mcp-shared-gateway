@@ -75,13 +75,17 @@ export function readToken() {
   }
 }
 
+// The token file is readable by its owner only (POSIX; on Windows the user profile ACLs apply).
 export function ensureToken() {
   const existing = readToken();
-  if (existing) return existing;
+  if (existing) {
+    if (process.platform !== 'win32') try { fs.chmodSync(TOKEN_FILE, 0o600); } catch {}
+    return existing;
+  }
   fs.mkdirSync(STATE_DIR, { recursive: true });
   const token = crypto.randomBytes(24).toString('hex');
   try {
-    fs.writeFileSync(TOKEN_FILE, token, { encoding: 'utf8', flag: 'wx' });
+    fs.writeFileSync(TOKEN_FILE, token, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
   } catch (err) {
     if (err.code === 'EEXIST') return readToken();
     throw err;
