@@ -9,8 +9,6 @@ export const CONFIG_FILE = path.resolve(process.env.MCP_GATEWAY_CONFIG || path.j
 export const STATE_DIR = path.resolve(process.env.MCP_GATEWAY_STATE || path.join(ROOT, '.local'));
 export const LOG_DIR = path.join(STATE_DIR, 'logs');
 export const CATALOG_DIR = path.join(STATE_DIR, 'catalog');
-export const OUTPUT_DIR = path.join(STATE_DIR, 'outputs');
-export const WORK_DIR = path.join(STATE_DIR, 'work');
 export const TOKEN_FILE = path.join(STATE_DIR, 'token');
 export const PID_FILE = path.join(STATE_DIR, 'gateway.pid');
 export const SECRETS_FILE = path.join(STATE_DIR, 'secrets.json');
@@ -25,8 +23,8 @@ const GATEWAY_DEFAULTS = {
   maxTimeoutSec: 900,
 };
 
-export function ensureDirs() {
-  for (const d of [STATE_DIR, LOG_DIR, CATALOG_DIR, OUTPUT_DIR, WORK_DIR]) fs.mkdirSync(d, { recursive: true });
+export function ensureDirs(cfg) {
+  for (const d of [STATE_DIR, LOG_DIR, CATALOG_DIR, cfg.gateway.outputDir, cfg.gateway.workDir]) fs.mkdirSync(d, { recursive: true });
 }
 
 function readJson(file, fallback) {
@@ -39,10 +37,11 @@ function readJson(file, fallback) {
 }
 
 // ${NAME} is resolved from secrets.json, then from the environment; unresolved names are left as-is
-// so the backend's error shows which one is missing.
+// so the backend's error shows which one is missing. ${CWD} and ${CLIENT} are filled in per instance.
+const PER_INSTANCE = new Set(['CWD', 'CLIENT']);
 function substitute(value, secrets) {
   if (typeof value === 'string') {
-    return value.replace(/\$\{([A-Z0-9_]+)\}/g, (m, name) => secrets[name] ?? process.env[name] ?? m);
+    return value.replace(/\$\{([A-Z0-9_]+)\}/g, (m, name) => (PER_INSTANCE.has(name) ? m : secrets[name] ?? process.env[name] ?? m));
   }
   if (Array.isArray(value)) return value.map(v => substitute(v, secrets));
   if (value && typeof value === 'object') {
@@ -57,8 +56,14 @@ export function loadConfig() {
   }
   const raw = readJson(CONFIG_FILE);
   const cfg = substitute(raw, readJson(SECRETS_FILE, {}));
-  cfg.gateway = { ...GATEWAY_DEFAULTS, ...(cfg.gateway || {}) };
+  const G = cfg.gateway = { ...GATEWAY_DEFAULTS, ...(cfg.gateway || {}) };
   cfg.servers = cfg.servers || {};
+  // Relative paths in the gateway section are relative to the config file.
+  const here = p => path.resolve(path.dirname(CONFIG_FILE), p);
+  G.outputDir = G.outputDir ? here(G.outputDir) : path.join(STATE_DIR, 'outputs');
+  G.workDir = G.workDir ? here(G.workDir) : path.join(STATE_DIR, 'work');
+  if (G.instructionsFile) G.instructions = fs.readFileSync(here(G.instructionsFile), 'utf8').trim();
+  else if (Array.isArray(G.instructions)) G.instructions = G.instructions.join('\n');
   return cfg;
 }
 
@@ -112,13 +117,15 @@ const PROXY_KEYS = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY'];
 
 // Env for child processes. Variables injected by AI clients (CLAUDE*, CODEX*, ...) are dropped so that a
 // backend shared by several clients does not inherit one client's session settings. When `gateway.proxy`
-// is set, it replaces whatever proxy the launching client had.
+// is set, it replaces whatever proxy the launching client had. `gateway.dropEnv` lists more names to drop
+// (e.g. NODE_EXTRA_CA_CERTS that a client's own MITM proxy needs).
 export function cleanEnv(gatewayCfg, extra = {}) {
   const env = {};
   const overrideProxy = Boolean(gatewayCfg?.proxy || gatewayCfg?.noProxy);
+  const drop = new Set((gatewayCfg?.dropEnv || []).map(k => k.toUpperCase()));
   for (const [k, v] of Object.entries(process.env)) {
     const up = k.toUpperCase();
-    if (/^(CLAUDE|CODEX|CURSOR_TRACE)/.test(up)) continue;
+    if (/^(CLAUDE|CODEX|ZCODE|CURSOR_TRACE)/.test(up) || drop.has(up)) continue;
     if (overrideProxy && (PROXY_KEYS.includes(up) || up === 'NODE_USE_ENV_PROXY')) continue;
     env[k] = v;
   }

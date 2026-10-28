@@ -7,7 +7,7 @@
 // Options: --owner <name> (default "cli"; calls with the same owner reuse the same per-session instances), --json
 import fs from 'node:fs';
 import path from 'node:path';
-import { OUTPUT_DIR, loadConfig, gatewayUrl, healthCheck, readToken, ensureDirs } from './common.mjs';
+import { loadConfig, gatewayUrl, healthCheck, readToken, ensureDirs } from './common.mjs';
 import { connectGateway, ensureGateway } from './client.mjs';
 import { CLIENT_CWD_KEY } from './meta.mjs';
 
@@ -53,14 +53,14 @@ function parseJsonArg(s) {
   return JSON.parse(text);
 }
 
-function print(result) {
+function print(result, cfg) {
   if (opts.json) { console.log(JSON.stringify(result, null, 2)); return; }
   for (const c of result.content || []) {
     if (c.type === 'text') console.log(c.text);
     else if (c.type === 'image') {
-      ensureDirs();
+      ensureDirs(cfg);
       const ext = (c.mimeType || 'image/png').split('/')[1] || 'png';
-      const file = path.join(OUTPUT_DIR, `cli-${Date.now()}.${ext}`);
+      const file = path.join(cfg.gateway.outputDir, `cli-${Date.now()}.${ext}`);
       fs.writeFileSync(file, Buffer.from(c.data, 'base64'));
       console.log(`[image ${c.mimeType} saved to ${file}]`);
     } else console.log(JSON.stringify(c));
@@ -93,7 +93,7 @@ async function main() {
   try {
     const sec = Math.min(Number(opts.timeout) || cfg.gateway.defaultTimeoutSec, cfg.gateway.maxTimeoutSec);
     const result = await client.callTool({ name, arguments: toolArgs }, undefined, { timeout: (sec + 90) * 1000, resetTimeoutOnProgress: true });
-    print(result);
+    print(result, cfg);
     process.exitCode = result.isError ? 1 : 0;
   } finally {
     await client.close();

@@ -1,6 +1,6 @@
 {
   "name": "mcp-shared-gateway",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "One local MCP gateway for all your AI agents: backend MCP servers are started once, shared across sessions, and stopped when idle.",
   "license": "MIT",
   "type": "module",
@@ -8,6 +8,7 @@
   "engines": {
     "node": ">=22"
   },
+  "files": ["src", "config/servers.example.json", "mcpx.cmd"],
   "bin": {
     "mcpx": "src/cli.mjs"
   },

@@ -70,13 +70,19 @@ args = ["/path/to/mcp-shared-gateway/src/shim.mjs"]
 | `gateway.idleMinutes` | 后端闲置多少分钟后关闭，默认 15。 |
 | `gateway.proxy` / `noProxy` | 后端用的代理。要写在这里：Windows 上网关不会继承客户端的环境变量。 |
 | `gateway.defaultTimeoutSec` / `maxTimeoutSec` / `inlineTextLimit` | 调用的默认超时 120 秒、最长 900 秒；文本结果超过 40000 字符就写到文件里。 |
+| `gateway.outputDir` / `workDir` | 长结果写到哪里、后端默认的工作目录（默认是状态目录下的 `outputs/` 和 `work/`）。相对路径相对于配置文件所在目录。 |
+| `gateway.instructions` / `instructionsFile` | 替换显示给 agent 的内置说明：可以是字符串、字符串数组（每项一行），或相对配置文件的文件路径。各服务的 `hint` 仍会追加在后面。 |
+| `gateway.dropEnv` | 额外列出不让后端继承的环境变量名（例如 `NODE_EXTRA_CA_CERTS`）。以 `CLAUDE`、`CODEX`、`ZCODE`、`CURSOR_TRACE` 开头的变量总是会去掉。 |
+| `gateway.clientAliases` | `{ "<正则>": "<别名>" }`，不区分大小写，第一个匹配的生效：把 `codex-mcp-client` 这类客户端名换成 `${CLIENT}` 的取值。 |
 | `browser` | 可选。共享 Chrome 的设置（`executable`、`userDataDir`、`port`、`args`），给 `"browser": true` 的服务用。 |
 | `servers.<名>.scope` | `"shared"`：全机一个实例，调用并发执行。`"owner"`：每个会话一个实例，调用按顺序执行。 |
 | `servers.<名>.command` / `args` / `env` | 本地 stdio 服务。 |
+| `servers.<名>.clientEnv` | 按实例填值的环境变量，可以用 `${CLIENT}`（调用方客户端，见 `clientAliases`）和 `${CWD}`。适合 `owner` 服务；`shared` 实例保留第一个拉起它的客户端的值。 |
 | `servers.<名>.url` / `headers` | 远程 Streamable HTTP 服务。 |
 | `servers.<名>.cwd` | `"key"`：每个工作目录一个实例；`"required"`：调用时必须传 `cwd`。`cwdArgs` 里可以用 `${CWD}`。 |
 | `servers.<名>.description` / `hint` | 会显示给 agent，出现在 `list` 结果和网关说明里。 |
 | `servers.<名>.browser` | 连接共享 Chrome，每个会话一个独立窗口（配合 `chrome-devtools-mcp` 使用）。 |
+| `servers.<名>.version` | 显示在 `list` 里。工具清单按服务缓存；升级后端时改一下 `version`，缓存就会刷新。 |
 
 配置里任何位置都可以写 `${NAME}`。它先从 `.local/secrets.json` 取值，取不到再读环境变量，这样密钥不用写进配置文件。
 
@@ -97,6 +103,28 @@ node src/cli.mjs stop                   # 停掉网关；下次调用时自动�
 ```
 
 Windows 上可以用 `mcpx.cmd` 代替 `node src/cli.mjs`。
+
+## 私有部署
+
+本机专用的内容（配置、用自己语言写的说明、自己的后端）放在单独的私有仓库里，把本仓库当依赖引入，并钉到某个提交：
+
+```bash
+pnpm add github:2836603852/mcp-shared-gateway#<commit>
+```
+
+在私有仓库里加几个很薄的入口文件，先指定配置和状态目录，再加载真正的入口。`common.mjs` 加载时就会确定路径，所以要先设置环境变量，再用动态 `import()`：
+
+```js
+// src/shim.mjs（cli.mjs、launch.mjs、gateway.mjs 写法相同）
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+const HERE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+process.env.MCP_GATEWAY_CONFIG ||= path.join(HERE, 'config', 'servers.json');
+process.env.MCP_GATEWAY_STATE ||= path.join(HERE, '.local');
+await import('mcp-shared-gateway/src/shim.mjs');
+```
+
+客户端挂的是私有仓库里的 `src/shim.mjs`。网关本身从依赖包里启动，配置和状态路径通过参数传给它，所以设置要写在 `servers.json` 里，不要依赖客户端的环境变量。
 
 ## 原理
 

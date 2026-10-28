@@ -1,5 +1,5 @@
-// Starts a gateway on a spare port with two copies of a tiny fixture server (one shared, one per owner)
-// and checks how many backend processes the gateway starts for two different sessions.
+// Starts a gateway on a spare port with copies of a tiny fixture server (shared, per owner, per-client env)
+// and checks how many backend processes the gateway starts, what env they get and where long results go.
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -45,14 +45,18 @@ const status = async c => JSON.parse(text(await c.callTool({ name: 'status', arg
 before(async () => {
   const echo = { command: process.execPath, args: [FIXTURE] };
   fs.writeFileSync(path.join(state, 'servers.json'), JSON.stringify({
-    gateway: { port: PORT },
+    gateway: { port: PORT, outputDir: 'spilled', inlineTextLimit: 1000, dropEnv: ['GW_TEST_DROP'], clientAliases: { '^test$': 'aliased' } },
     servers: {
       'shared-echo': { description: 'fixture', scope: 'shared', ...echo },
       'owner-echo': { description: 'fixture', scope: 'owner', ...echo },
+      'client-echo': { description: 'fixture', scope: 'owner', ...echo, clientEnv: { GW_TEST_CLIENT: '${CLIENT}' } },
     },
   }));
   gateway = spawn(process.execPath, [path.join(ROOT, 'src', 'gateway.mjs')], {
-    env: { ...process.env, MCP_GATEWAY_CONFIG: path.join(state, 'servers.json'), MCP_GATEWAY_STATE: state, GW_IDLE_MINUTES: '0.05' },
+    env: {
+      ...process.env, MCP_GATEWAY_CONFIG: path.join(state, 'servers.json'), MCP_GATEWAY_STATE: state, GW_IDLE_MINUTES: '0.05',
+      GW_TEST_DROP: 'leaked', GW_TEST_KEEP: 'kept', ZCODE_TEST: 'leaked',
+    },
     stdio: 'ignore',
     windowsHide: true,
   });
@@ -102,6 +106,23 @@ test('shim: answers initialize and tools/list locally, forwards calls to the gat
   assert.deepEqual(tools.map(t => t.name).sort(), ['call', 'describe', 'list', 'reset', 'resource', 'status']);
   assert.ok((await pidOf(c, 'shared-echo')) > 0);
   assert.match((await status(c)).caller, /^gw-shim\/shim-test\//);
+});
+
+test('backend env: client alias via clientEnv, dropEnv and client prefixes removed, the rest kept', async () => {
+  const a = await connect('f');
+  const env = async name => text(await a.callTool({ name: 'call', arguments: { server: 'client-echo', tool: 'env', arguments: { name } } }));
+  assert.equal(await env('GW_TEST_CLIENT'), 'aliased');
+  assert.equal(await env('GW_TEST_DROP'), '');
+  assert.equal(await env('ZCODE_TEST'), '');
+  assert.equal(await env('GW_TEST_KEEP'), 'kept');
+});
+
+test('long text results are written to gateway.outputDir', async () => {
+  const a = await connect('g');
+  const r = text(await a.callTool({ name: 'call', arguments: { server: 'shared-echo', tool: 'big', arguments: { chars: 5000 } } }));
+  const file = r.match(/written to (.+)\]$/)?.[1];
+  assert.ok(file && path.dirname(file) === path.join(state, 'spilled'), r.slice(-200));
+  assert.equal(fs.readFileSync(file, 'utf8').length, 5000);
 });
 
 test('idle backends are stopped', async () => {

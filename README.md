@@ -70,13 +70,19 @@ Anything that takes `mcpServers` JSON (Cursor, Claude Desktop, …):
 | `gateway.idleMinutes` | Stop a backend after this many idle minutes (default 15). |
 | `gateway.proxy` / `noProxy` | Proxy for backends. Set it here: on Windows the gateway does not inherit the client's environment. |
 | `gateway.defaultTimeoutSec` / `maxTimeoutSec` / `inlineTextLimit` | Call timeouts (120 / 900 s) and the size above which long text results are written to a file (40 000 chars). |
+| `gateway.outputDir` / `workDir` | Where long results are written and the default working directory of backends (default `outputs/` and `work/` in the state directory). Relative paths are relative to the config file. |
+| `gateway.instructions` / `instructionsFile` | Replace the built-in instructions shown to agents (a string, an array of lines, or a file relative to the config). Server `hint`s are still appended. |
+| `gateway.dropEnv` | Extra environment variable names that backends must not inherit (e.g. `NODE_EXTRA_CA_CERTS`). Variables starting with `CLAUDE`, `CODEX`, `ZCODE` and `CURSOR_TRACE` are always dropped. |
+| `gateway.clientAliases` | `{ "<regex>": "<alias>" }`, first match wins (case-insensitive): turns client names such as `codex-mcp-client` into the value of `${CLIENT}`. |
 | `browser` | Optional shared Chrome (`executable`, `userDataDir`, `port`, `args`) for servers with `"browser": true`. |
 | `servers.<name>.scope` | `"shared"`: one instance for the machine, calls run concurrently. `"owner"`: one instance per session, calls run in order. |
 | `servers.<name>.command` / `args` / `env` | A stdio server. |
+| `servers.<name>.clientEnv` | Env values filled in per instance: `${CLIENT}` (the calling client, see `clientAliases`) and `${CWD}`. Meant for `owner` servers; a `shared` instance keeps the values of whoever started it. |
 | `servers.<name>.url` / `headers` | A remote Streamable HTTP server. |
 | `servers.<name>.cwd` | `"key"`: one instance per working directory; `"required"`: callers must pass `cwd`. `cwdArgs` may use `${CWD}`. |
 | `servers.<name>.description` / `hint` | Shown to the agent in `list` and in the gateway instructions. |
 | `servers.<name>.browser` | Attach to the shared Chrome; each session gets its own window (for `chrome-devtools-mcp`). |
+| `servers.<name>.version` | Shown in `list`. The tool list is cached per server; change `version` when you upgrade a backend so the cache is refreshed. |
 
 `${NAME}` anywhere in the config is filled from `.local/secrets.json`, then from the environment, so keys stay out of the config.
 
@@ -97,6 +103,28 @@ node src/cli.mjs stop                   # restart picks up config changes on the
 ```
 
 On Windows, `mcpx.cmd` is a shortcut for `node src/cli.mjs`.
+
+## Private deployment
+
+Keep your machine-specific setup (config, instructions in your language, your own backends) in a separate private repository and use this one as a dependency, pinned to a commit:
+
+```bash
+pnpm add github:2836603852/mcp-shared-gateway#<commit>
+```
+
+In that repository, add thin entry files that point the gateway at your config and state, then load the real one. The paths are fixed when `common.mjs` is loaded, so set them first and use a dynamic `import()`:
+
+```js
+// src/shim.mjs (same pattern for cli.mjs, launch.mjs and gateway.mjs)
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+const HERE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+process.env.MCP_GATEWAY_CONFIG ||= path.join(HERE, 'config', 'servers.json');
+process.env.MCP_GATEWAY_STATE ||= path.join(HERE, '.local');
+await import('mcp-shared-gateway/src/shim.mjs');
+```
+
+Clients mount your `src/shim.mjs`. The gateway itself is started from the package; it receives the config and state paths as arguments, so settings belong in `servers.json`, not in environment variables of the client.
 
 ## How it works
 

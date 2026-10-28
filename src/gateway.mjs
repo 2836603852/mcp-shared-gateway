@@ -12,7 +12,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { ListToolsRequestSchema, CallToolRequestSchema, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import {
-  CATALOG_DIR, OUTPUT_DIR, WORK_DIR, PID_FILE, VERSION,
+  CATALOG_DIR, PID_FILE, VERSION,
   ensureDirs, ensureToken, loadConfig, appendLog, log, cleanEnv, sleep,
 } from './common.mjs';
 import { META_TOOLS, buildInstructions, CLIENT_CWD_KEY } from './meta.mjs';
@@ -22,7 +22,7 @@ const G = cfg.gateway;
 const B = cfg.browser || null;
 const IDLE_MS = (Number(process.env.GW_IDLE_MINUTES) || G.idleMinutes) * 60_000;
 const INSTRUCTIONS = buildInstructions(cfg);
-ensureDirs();
+ensureDirs(cfg);
 const token = ensureToken();
 const startedAt = Date.now();
 
@@ -57,7 +57,7 @@ function killTree(pid) {
   return Promise.resolve();
 }
 
-const tmpl = (s, vars) => (typeof s === 'string' ? s.replace(/\$\{CWD\}/g, () => vars.CWD ?? '') : s);
+const tmpl = (s, vars) => (typeof s === 'string' ? s.replace(/\$\{(CWD|CLIENT)\}/g, (_, k) => vars[k] ?? '') : s);
 const firstLine = (s, n = 140) => {
   const line = String(s || '').split('\n').find(l => l.trim()) || '';
   return line.length > n ? line.slice(0, n - 1) + '…' : line;
@@ -70,6 +70,11 @@ function ownerCtx(name = 'anonymous') {
   const client = parts[0].startsWith('gw-') ? (parts[1] || 'unknown') : name;
   return { owner: name, client };
 }
+
+// ${CLIENT} in args/cwdArgs/clientEnv: the client name, mapped through gateway.clientAliases
+// ({ "<case-insensitive regex>": "<alias>" }, first match wins), e.g. codex-mcp-client -> codex.
+const clientAliases = Object.entries(G.clientAliases || {}).map(([re, alias]) => [new RegExp(re, 'i'), alias]);
+const clientAlias = client => clientAliases.find(([re]) => re.test(client))?.[1] ?? client;
 
 // ---------- shared browser (optional) ----------
 const browser = {
@@ -188,13 +193,15 @@ function spawnTransport(name, def, ctx, cwd) {
   if (def.url) {
     return new StreamableHTTPClientTransport(new URL(def.url), { requestInit: { headers: def.headers || {} } });
   }
-  const vars = { CWD: cwd || '' };
+  const vars = { CWD: cwd || '', CLIENT: clientAlias(ctx.client) };
   const args = [...(def.args || []), ...((cwd && def.cwdArgs) || [])].map(a => tmpl(a, vars));
+  const env = { ...(def.env || {}) };
+  for (const [k, v] of Object.entries(def.clientEnv || {})) env[k] = tmpl(v, vars);
   const transport = new StdioClientTransport({
     command: def.command,
     args,
-    env: cleanEnv(G, def.env || {}),
-    cwd: cwd || WORK_DIR,
+    env: cleanEnv(G, env),
+    cwd: cwd || G.workDir,
     stderr: 'pipe',
   });
   transport.stderr?.on('data', d => appendLog(`${name}.stderr.log`, `[${new Date().toISOString()}] [${ctx.owner}] ${String(d).trimEnd()}`));
@@ -354,7 +361,7 @@ const safeName = s => String(s).replace(/[^A-Za-z0-9_.-]+/g, '_').slice(0, 60);
 const stamp = () => new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '-');
 
 function spillText(full, server, tool) {
-  const file = path.join(OUTPUT_DIR, `${stamp()}_${crypto.randomBytes(2).toString('hex')}_${safeName(server)}_${safeName(tool)}.txt`);
+  const file = path.join(G.outputDir, `${stamp()}_${crypto.randomBytes(2).toString('hex')}_${safeName(server)}_${safeName(tool)}.txt`);
   fs.writeFileSync(file, full);
   return `${full.slice(0, 4000)}\n\n…[full text, ${full.length} chars, written to ${file}]`;
 }
@@ -394,7 +401,7 @@ async function handleMeta(name, args, ctx) {
         const lines = Object.entries(cfg.servers).map(([n, def]) => {
           const cat = readCatalog(n, def);
           const running = [...instances.values()].filter(i => i.name === n).length;
-          return `- ${n} (${scopeLabel(def)}; tools ${cat ? cat.tools.length : 'not cached'}; running ${running}): ${def.description || ''}`;
+          return `- ${n} (${scopeLabel(def)}${def.version ? `; version ${def.version}` : ''}; tools ${cat ? cat.tools.length : 'not cached'}; running ${running}): ${def.description || ''}`;
         });
         return textResult(`Servers:\n${lines.join('\n')}\n\nUse list(server) for tools and describe(server, tool) for arguments.`);
       }
@@ -474,7 +481,7 @@ async function handleMeta(name, args, ctx) {
       const data = {
         gateway: { pid: process.pid, version: VERSION, port: G.port, uptimeMin: Math.round((now - startedAt) / 60_000), sessions: sessions.size + rpcOwners.size, idleMinutes: IDLE_MS / 60_000 },
         caller: ctx.owner,
-        browser: B ? { running: Boolean(info), version: info?.Browser || null, port: B.port } : null,
+        browser: B ? { running: Boolean(info), version: info?.Browser || null, port: B.port, userDataDir: B.userDataDir } : null,
         instances: [...instances.values()].map(i => ({
           server: i.name, owner: i.key.split('|')[1] === '*' ? '*' : i.owner, cwd: i.cwd, pid: i.pid, busy: i.busy,
           idleMin: Math.round((now - i.lastUsed) / 6000) / 10, window: i.windowTarget ? `pageId ${i.windowPageId ?? '?'}` : undefined,
@@ -590,8 +597,8 @@ const httpServer = http.createServer(async (req, res) => {
 // ---------- idle reaping and cleanup ----------
 function sweepOutputs() {
   try {
-    const files = fs.readdirSync(OUTPUT_DIR).map(f => {
-      const p = path.join(OUTPUT_DIR, f);
+    const files = fs.readdirSync(G.outputDir).map(f => {
+      const p = path.join(G.outputDir, f);
       const st = fs.statSync(p);
       return { p, mtime: st.mtimeMs, size: st.size };
     }).sort((a, b) => b.mtime - a.mtime);

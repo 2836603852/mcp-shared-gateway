@@ -16,9 +16,11 @@ Conventions:
 
 const BROWSER = `- Browser servers attach to one shared browser (shared logins). Each session gets its own window, preselected for it. Work only in your own window and pages: open new pages in the background, never close or navigate other sessions' pages, and close the pages you opened when done.`;
 
+// gateway.instructions / instructionsFile replace the built-in text (e.g. to write it in another language
+// or add machine-specific rules); server hints are appended either way.
 export function buildInstructions(cfg) {
-  const lines = [BASE];
-  if (Object.values(cfg.servers).some(d => d.browser)) lines.push(BROWSER);
+  const lines = [cfg.gateway.instructions || BASE];
+  if (!cfg.gateway.instructions && Object.values(cfg.servers).some(d => d.browser)) lines.push(BROWSER);
   const hints = Object.entries(cfg.servers).filter(([, d]) => d.hint).map(([n, d]) => `- ${n}: ${d.hint}`);
   if (hints.length) lines.push('', 'Server notes:', ...hints);
   return lines.join('\n');
