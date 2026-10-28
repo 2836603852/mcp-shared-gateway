@@ -183,13 +183,13 @@ const browser = {
     const { windowId } = await this.cdp('Browser.getWindowForTarget', { targetId: r.targetId });
     return { targetId: r.targetId, windowId };
   },
-  // Page targets in a window, the given target first if it is still there.
+  // Page targets (TargetInfo) in a window, the given target first if it is still there.
   pagesIn(windowId, first) {
     return this.session(async send => {
       const { targetInfos } = await send('Target.getTargets');
-      const ids = targetInfos.filter(t => t.type === 'page').map(t => t.targetId).sort((a, b) => (b === first) - (a === first));
-      const wins = await Promise.all(ids.map(targetId => send('Browser.getWindowForTarget', { targetId }).then(r => r.windowId, () => null)));
-      return ids.filter((_, i) => wins[i] === windowId);
+      const pages = targetInfos.filter(t => t.type === 'page').sort((a, b) => (b.targetId === first) - (a.targetId === first));
+      const wins = await Promise.all(pages.map(({ targetId }) => send('Browser.getWindowForTarget', { targetId }).then(r => r.windowId, () => null)));
+      return pages.filter((_, i) => wins[i] === windowId);
     });
   },
   // Open url as a background tab next to page `opener`. Target.createTarget cannot pick a window (Chrome puts
@@ -214,10 +214,18 @@ const browser = {
       await fetch(`http://127.0.0.1:${B.port}/json/close/${id}`, { signal: AbortSignal.timeout(3000) });
     } catch {}
   },
-  // A session's window goes away with all its tabs, not only the one the gateway opened.
+  // A session's window goes away with the tabs the gateway opened for it and the popups they opened. Other
+  // tabs that ended up in the window (another session's, the user's) stay.
   async closeWindow(inst) {
-    const ids = inst.windowId != null ? await this.pagesIn(inst.windowId, inst.windowTarget).catch(() => []) : [];
-    await Promise.all([...new Set([inst.windowTarget, ...ids])].map(id => this.closeTarget(id)));
+    const own = new Set(inst.ownTargets);
+    const pages = inst.windowId != null ? await this.pagesIn(inst.windowId).catch(() => []) : [];
+    // A click that timed out (page blocked by a dialog) can still open its tab later.
+    for (const t of pages) if (inst.tabMarkers.some(m => t.url.includes(m))) own.add(t.targetId);
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const t of pages) if (!own.has(t.targetId) && own.has(t.openerId)) { own.add(t.targetId); grew = true; }
+    }
+    await Promise.all([...own].map(id => this.closeTarget(id)));
   },
 };
 
@@ -227,6 +235,7 @@ async function setupWindow(inst) {
   const win = await browser.openWindow(marker);
   inst.windowTarget = win.targetId;
   inst.windowId = win.windowId;
+  inst.ownTargets.add(win.targetId);
   const pageId = await findPageId(inst.mcp, marker);
   if (pageId == null) throw new Error('New window did not show up in list_pages');
   await inst.mcp.callTool({ name: 'select_page', arguments: { pageId, bringToFront: false } }, undefined, { timeout: 30_000 });
@@ -250,9 +259,10 @@ async function findPageId(mcp, marker) {
 // navigate it. Returns null (and the caller falls back to the backend's new_page) when that is not possible.
 async function newPageInWindow(inst, mcp, a, timeoutMs) {
   if (inst.windowId == null || a.isolatedContext !== undefined || typeof a.url !== 'string') return null;
-  const [opener] = await browser.pagesIn(inst.windowId, inst.windowTarget).catch(() => []);
+  const [opener] = (await browser.pagesIn(inst.windowId, inst.windowTarget).catch(() => [])).map(t => t.targetId);
   if (!opener) return null;
   const marker = `gw-tab-${crypto.randomBytes(4).toString('hex')}`;
+  inst.tabMarkers.push(marker);
   try {
     await browser.clickOpen(opener, `about:blank#${marker}`);
   } catch (err) {
@@ -260,6 +270,9 @@ async function newPageInWindow(inst, mcp, a, timeoutMs) {
     return null;
   }
   const pageId = await findPageId(mcp, marker);
+  // Tracked even when it never showed up in list_pages, so the window's teardown still closes it.
+  const tab = (await browser.cdp('Target.getTargets').catch(() => ({ targetInfos: [] }))).targetInfos.find(t => t.url.includes(marker));
+  if (tab) inst.ownTargets.add(tab.targetId);
   if (pageId == null) {
     pushError(`${inst.name}.new_page`, `tab ${marker} did not show up in list_pages`);
     return null;
@@ -324,7 +337,7 @@ async function createInstance(name, def, key, ctx, cwd, { catalogOnly = false } 
   const inst = {
     key, name, owner: ctx.owner, client: ctx.client, cwd, mcp, transport,
     startedAt: Date.now(), lastUsed: Date.now(), busy: 0, chain: Promise.resolve(),
-    serial: def.scope === 'owner', closed: false, pid: null, windowTarget: null, windowId: null, browserWs,
+    serial: def.scope === 'owner', closed: false, pid: null, windowTarget: null, windowId: null, ownTargets: new Set(), tabMarkers: [], browserWs,
   };
   mcp.onclose = () => onClosed(inst, 'backend connection closed');
   try {
