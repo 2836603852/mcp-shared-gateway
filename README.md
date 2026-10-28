@@ -104,27 +104,15 @@ node src/cli.mjs stop                   # restart picks up config changes on the
 
 On Windows, `mcpx.cmd` is a shortcut for `node src/cli.mjs`.
 
-## Private deployment
+## Running it day to day
 
-Keep your machine-specific setup (config, instructions in your language, your own backends) in a separate private repository and use this one as a dependency, pinned to a commit:
+Run the gateway from a clone you only update when CI is green, and keep everything machine-specific in files git ignores:
 
-```bash
-pnpm add github:2836603852/mcp-shared-gateway#<commit>
-```
+- `config/servers.json`: your servers, proxy, paths. Relative paths in the `gateway` section are relative to this file, e.g. `"instructionsFile": "../.local/instructions.md"` for instructions in your own language, `"outputDir": "../.tmp/outputs"`.
+- `.local/`: token, `secrets.json`, logs, tool catalog cache, your instructions file.
+- `.tmp/`: long results and the backends' working directory (safe to delete).
 
-In that repository, add thin entry files that point the gateway at your config and state, then load the real one. The paths are fixed when `common.mjs` is loaded, so set them first and use a dynamic `import()`:
-
-```js
-// src/shim.mjs (same pattern for cli.mjs, launch.mjs and gateway.mjs)
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-const HERE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-process.env.MCP_GATEWAY_CONFIG ||= path.join(HERE, 'config', 'servers.json');
-process.env.MCP_GATEWAY_STATE ||= path.join(HERE, '.local');
-await import('mcp-shared-gateway/src/shim.mjs');
-```
-
-Clients mount your `src/shim.mjs`. The gateway itself is started from the package; it receives the config and state paths as arguments, so settings belong in `servers.json`, not in environment variables of the client.
+To update: `git pull --ff-only`, then `node src/cli.mjs stop` when no session is in the middle of a call; the next call starts the new version. If you also work on the gateway, use a second clone for development so unfinished changes never run as your live gateway.
 
 ## How it works
 

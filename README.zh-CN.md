@@ -104,27 +104,15 @@ node src/cli.mjs stop                   # 停掉网关；下次调用时自动�
 
 Windows 上可以用 `mcpx.cmd` 代替 `node src/cli.mjs`。
 
-## 私有部署
+## 日常使用
 
-本机专用的内容（配置、用自己语言写的说明、自己的后端）放在单独的私有仓库里，把本仓库当依赖引入，并钉到某个提交：
+日常用的网关单独克隆一份，只在 CI 通过后更新；本机专用的内容都放在 git 忽略的文件里：
 
-```bash
-pnpm add github:2836603852/mcp-shared-gateway#<commit>
-```
+- `config/servers.json`：服务、代理、路径。`gateway` 段里的相对路径相对于这个文件，例如用自己语言写的说明 `"instructionsFile": "../.local/instructions.md"`，长结果 `"outputDir": "../.tmp/outputs"`。
+- `.local/`：令牌、`secrets.json`、日志、工具清单缓存、自己的说明文件。
+- `.tmp/`：长结果和后端的工作目录（可以随时删）。
 
-在私有仓库里加几个很薄的入口文件，先指定配置和状态目录，再加载真正的入口。`common.mjs` 加载时就会确定路径，所以要先设置环境变量，再用动态 `import()`：
-
-```js
-// src/shim.mjs（cli.mjs、launch.mjs、gateway.mjs 写法相同）
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-const HERE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-process.env.MCP_GATEWAY_CONFIG ||= path.join(HERE, 'config', 'servers.json');
-process.env.MCP_GATEWAY_STATE ||= path.join(HERE, '.local');
-await import('mcp-shared-gateway/src/shim.mjs');
-```
-
-客户端挂的是私有仓库里的 `src/shim.mjs`。网关本身从依赖包里启动，配置和状态路径通过参数传给它，所以设置要写在 `servers.json` 里，不要依赖客户端的环境变量。
+更新：`git pull --ff-only`，确认没有会话正在调用后执行 `node src/cli.mjs stop`，下一次调用就会启动新版本。如果你也在改网关代码，开发用另一份克隆，没改完的代码就不会跑在日常网关上。
 
 ## 原理
 
