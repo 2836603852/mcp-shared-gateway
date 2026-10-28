@@ -2,3 +2,4 @@ node_modules/
 .local/
 config/servers.json
 *.log
+.tmp/

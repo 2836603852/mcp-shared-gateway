@@ -10,7 +10,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { ListToolsRequestSchema, CallToolRequestSchema, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { ListToolsRequestSchema, CallToolRequestSchema, ErrorCode, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import {
   CATALOG_DIR, PID_FILE, VERSION,
   ensureDirs, ensureToken, loadConfig, appendLog, log, cleanEnv, sleep,
@@ -322,6 +322,22 @@ function runOn(inst, fn) {
   return p;
 }
 
+// A timed-out call usually keeps running in the backend. On a per-session instance the next call is queued
+// behind it, so a stuck backend turns into a series of timeouts; after the second one in a row the instance
+// is replaced. Shared instances are left alone: other sessions may be using them, and long commands time
+// out legitimately.
+const STUCK_AFTER = 2;
+
+async function onTimeout(inst, server, tool, sec) {
+  inst.timeouts = (inst.timeouts || 0) + 1;
+  const head = `${server} / ${tool} timed out after ${sec}s.`;
+  if (inst.serial && inst.timeouts >= STUCK_AFTER) {
+    await closeInstance(inst, `stuck: ${inst.timeouts} timeouts in a row`);
+    return `${head} That is ${inst.timeouts} timeouts in a row on this session's ${server} instance, so the gateway restarted it: the next call starts a fresh backend, and its state (open pages, selected device, …) is gone.`;
+  }
+  return `${head} The backend may still be working on it.${inst.serial ? ` Calls from this session to ${server} run in order and wait behind it; if the next one also times out, the gateway restarts this instance.` : ''} Use a larger timeout_sec for slow operations, or reset(server) to restart the backend now.`;
+}
+
 // ---------- tool catalog cache ----------
 // list/describe are answered from this cache, so browsing tools does not start any backend. The cache is
 // refreshed when anything that can change the tool list changes; a backend updated in place (npx @latest)
@@ -413,7 +429,10 @@ const textResult = (text, isError = false) => ({ content: [{ type: 'text', text 
 
 function getDef(server) {
   const def = cfg.servers[server];
-  if (!def) throw new Error(`Unknown server: ${server}. Available: ${Object.keys(cfg.servers).join(', ')}`);
+  if (!def) {
+    throw new Error(`Unknown server: ${server}. "server" is one of the gateway's backends: ${Object.keys(cfg.servers).join(', ')}. `
+      + 'Values that belong to the backend tool (e.g. an SSH host for an SSH server) go inside "arguments".');
+  }
   return def;
 }
 
@@ -435,10 +454,11 @@ async function handleMeta(name, args, ctx) {
       const q = (args.query || '').toLowerCase();
       const out = [];
       const failed = [];
-      for (const n of targets) {
-        const def = getDef(n);
-        let cat;
-        try { cat = await ensureCatalog(n, def); } catch (err) { failed.push(`${n}: ${err.message}`); continue; }
+      // Uncached catalogs are fetched in parallel, so a first cross-server search starts the backends at once.
+      const cats = await Promise.allSettled(targets.map(n => ensureCatalog(n, getDef(n))));
+      for (const [i, n] of targets.entries()) {
+        if (cats[i].status === 'rejected') { failed.push(`${n}: ${cats[i].reason?.message || cats[i].reason}`); continue; }
+        const cat = cats[i].value;
         for (const t of cat.tools) {
           if (q && !(`${t.name} ${t.description || ''}`.toLowerCase().includes(q))) continue;
           out.push(args.server ? `- ${t.name}: ${firstLine(t.description)}` : `- ${n} / ${t.name}: ${firstLine(t.description)}`);
@@ -457,7 +477,8 @@ async function handleMeta(name, args, ctx) {
         const near = cat.tools.map(x => x.name).filter(x => x.includes(args.tool) || args.tool.includes(x)).slice(0, 10);
         throw new Error(`${args.server} has no tool ${args.tool}${near.length ? `; similar: ${near.join(', ')}` : ''}`);
       }
-      return textResult(`# ${args.server} / ${t.name}\n\n${t.description || ''}\n\nInput (JSON Schema):\n${JSON.stringify(t.inputSchema || {}, null, 2)}${t.outputSchema ? `\n\nOutput (JSON Schema):\n${JSON.stringify(t.outputSchema, null, 2)}` : ''}`);
+      const notes = t.annotations ? `\n\nAnnotations: ${JSON.stringify(t.annotations)}` : '';
+      return textResult(`# ${args.server} / ${t.name}\n\n${t.description || ''}${notes}\n\nInput (JSON Schema):\n${JSON.stringify(t.inputSchema || {}, null, 2)}${t.outputSchema ? `\n\nOutput (JSON Schema):\n${JSON.stringify(t.outputSchema, null, 2)}` : ''}`);
     }
     case 'call': {
       if (!args.server || !args.tool) throw new Error('call needs server and tool');
@@ -466,17 +487,25 @@ async function handleMeta(name, args, ctx) {
       const inst = await getInstance(args.server, def, ctx, cwd);
       const sec = Math.min(Math.max(Number(args.timeout_sec) || G.defaultTimeoutSec, 1), G.maxTimeoutSec);
       const t0 = Date.now();
+      let started = t0;
+      const entry = () => ({ owner: ctx.owner, server: args.server, tool: args.tool, ms: Date.now() - started, queuedMs: started - t0, timeoutSec: sec });
       try {
-        const result = await runOn(inst, mcp => mcp.callTool(
-          { name: args.tool, arguments: args.arguments || {} },
-          undefined,
-          { timeout: sec * 1000, resetTimeoutOnProgress: true, maxTotalTimeout: G.maxTimeoutSec * 1000 },
-        ));
-        log('call', { owner: ctx.owner, server: args.server, tool: args.tool, ms: Date.now() - t0, isError: Boolean(result.isError) });
+        const result = await runOn(inst, mcp => {
+          started = Date.now();
+          inst.lastTool = args.tool;
+          return mcp.callTool(
+            { name: args.tool, arguments: args.arguments || {} },
+            undefined,
+            { timeout: sec * 1000, resetTimeoutOnProgress: true, maxTotalTimeout: G.maxTimeoutSec * 1000 },
+          );
+        });
+        inst.timeouts = 0;
+        log('call', { ...entry(), isError: Boolean(result.isError) });
         return postProcess(result, args.server, args.tool);
       } catch (err) {
-        log('call', { owner: ctx.owner, server: args.server, tool: args.tool, ms: Date.now() - t0, error: err.message });
-        throw err;
+        log('call', { ...entry(), error: err.message });
+        if (err?.code !== ErrorCode.RequestTimeout) throw err;
+        throw new Error(await onTimeout(inst, args.server, args.tool, sec));
       }
     }
     case 'resource': {
@@ -510,7 +539,8 @@ async function handleMeta(name, args, ctx) {
         browser: B ? { running: Boolean(info), version: info?.Browser || null, port: B.port, userDataDir: B.userDataDir } : null,
         instances: [...instances.values()].map(i => ({
           server: i.name, owner: i.key.split('|')[1] === '*' ? '*' : i.owner, cwd: i.cwd, pid: i.pid, busy: i.busy,
-          idleMin: Math.round((now - i.lastUsed) / 6000) / 10, window: i.windowTarget ? `pageId ${i.windowPageId ?? '?'}` : undefined,
+          idleMin: Math.round((now - i.lastUsed) / 6000) / 10, lastTool: i.lastTool, timeouts: i.timeouts || undefined,
+          window: i.windowTarget ? `pageId ${i.windowPageId ?? '?'}` : undefined,
         })),
         recentErrors,
       };
@@ -592,6 +622,16 @@ const httpServer = http.createServer(async (req, res) => {
       const ctx = ownerCtx(String(body.owner || 'anonymous'));
       rpcOwners.set(ctx.owner, Date.now());
       return sendJson(res, 200, await runMeta(String(body.name), body.arguments || {}, ctx));
+    }
+    // Sent by a shim when its client goes away: stop that session's per-session instances (and close their
+    // browser windows) now instead of after the idle timeout. Shared instances keep running.
+    if (url.pathname === '/session/end' && req.method === 'POST') {
+      const owner = String(((await readBody(req)) || {}).owner || '');
+      rpcOwners.delete(owner);
+      const mine = [...instances.values()].filter(i => owner && i.key.split('|')[1] === owner);
+      await Promise.allSettled(mine.map(i => closeInstance(i, 'session ended')));
+      log('session.end', { owner, stopped: mine.length });
+      return sendJson(res, 200, { ok: true, stopped: mine.length });
     }
     if (url.pathname !== '/mcp') return sendJson(res, 404, { error: 'not found' });
 

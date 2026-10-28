@@ -97,6 +97,9 @@ rl.on('line', line => {
   try { msg = JSON.parse(line); } catch { return send({ id: null, error: { code: -32700, message: 'Parse error' } }); }
   handle(msg).catch(err => msg.id !== undefined && send({ id: msg.id, error: { code: -32603, message: err.message } }));
 });
-rl.on('close', () => process.exit(0));
+// The client is gone: let the gateway stop this session's instances right away (best effort, 1 s at most).
+rl.on('close', () => {
+  post(`${gatewayUrl(cfg)}/session/end`, { owner }, 1000).catch(() => {}).finally(() => process.exit(0));
+});
 // Warm up without blocking initialize; the gateway is usually ready before the first call.
 ensureGateway(cfg).catch(err => process.stderr.write(`[mcp-shared-gateway] ${err.message}\n`));

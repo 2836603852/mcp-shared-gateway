@@ -130,13 +130,17 @@ Clients mount your `src/shim.mjs`. The gateway itself is started from the packag
 
 - **shim** (`src/shim.mjs`): the stdio server each client mounts. It has no MCP SDK dependency, answers `initialize` and `tools/list` itself, and forwards tool calls to the gateway over localhost HTTP. If the gateway is not running, the shim starts it. On Windows it uses WMI, so the gateway is outside the client's process tree and outlives it.
 - **gateway** (`src/gateway.mjs`): starts backends on first use. An instance is identified by server name + owner (or `*` when shared) + directory (when keyed by `cwd`). It caches tool lists, so `list` and `describe` don't start anything, and it stops idle backends.
+- **Sessions end cleanly.** When a client exits, its shim tells the gateway, which stops that session's `owner` instances (and closes its browser window) right away. Idle instances are still stopped after `idleMinutes`.
+- **Stuck backends recover.** A timed-out call usually keeps running in the backend, and calls on an `owner` instance run in order, so one stuck call makes the next ones time out too. After two timeouts in a row the gateway replaces that session's instance. The error text tells the agent what happened.
+- **Read-only meta-tools are marked as such** (MCP tool annotations), so clients with approvals turned off, such as Codex, can run `list`, `describe`, `status` and `resource` without asking. `describe` also shows the backend tool's own annotations.
 - Requests need a random Bearer token stored in `.local/token`, and the gateway only listens on `127.0.0.1`.
 
 ## Limits
 
 - Used daily on Windows 11. CI runs the tests on Windows, Linux and macOS, but day-to-day use on Linux and macOS is less tested.
 - All sessions using a shared server see the same backend state. Switch such servers to `owner` if that matters.
-- When a session ends, its `owner` instances are only stopped after the idle timeout.
+- If a client is killed without closing the shim's stdin, its `owner` instances are only stopped after the idle timeout.
+- Shared instances are never restarted automatically after timeouts (other sessions may be using them); use `reset`.
 
 ## Development
 

@@ -105,6 +105,8 @@ test('shim: answers initialize and tools/list locally, forwards calls to the gat
   assert.match(c.getInstructions(), /shared/);
   const { tools } = await c.listTools();
   assert.deepEqual(tools.map(t => t.name).sort(), ['call', 'describe', 'list', 'reset', 'resource', 'status']);
+  const hints = Object.fromEntries(tools.map(t => [t.name, t.annotations?.readOnlyHint]));
+  assert.deepEqual(hints, { list: true, describe: true, resource: true, status: true, call: false, reset: false });
   assert.ok((await pidOf(c, 'shared-echo')) > 0);
   assert.match((await status(c)).caller, /^gw-shim\/shim-test\//);
 });
@@ -147,6 +149,48 @@ test('reset stops the session\'s instance together with the processes it started
   for (let i = 0; i < 20 && (alive(server) || alive(child)); i++) await sleep(250);
   assert.equal(alive(server), false, 'backend still running');
   assert.equal(alive(child), false, 'backend child still running');
+});
+
+test('two timeouts in a row restart a per-session instance; shared instances are kept', async () => {
+  const a = await connect('k');
+  const slow = async server => text(await a.callTool({ name: 'call', arguments: { server, tool: 'sleep', arguments: { ms: 3000 }, timeout_sec: 1 } }));
+  const owned = await pidOf(a, 'owner-echo');
+  assert.match(await slow('owner-echo'), /timed out after 1s\. .*wait behind it/);
+  assert.match(await slow('owner-echo'), /restarted it/);
+  assert.notEqual(await pidOf(a, 'owner-echo'), owned);
+  const shared = await pidOf(a, 'shared-echo');
+  await slow('shared-echo');
+  assert.doesNotMatch(await slow('shared-echo'), /restarted/);
+  assert.equal(await pidOf(a, 'shared-echo'), shared);
+});
+
+test('when a shim exits, its per-session instances stop; other sessions keep theirs', async () => {
+  const other = await connect('l');
+  const kept = await pidOf(other, 'owner-echo');
+  const c = new Client({ name: 'shim-end', version: '0' }, { capabilities: {} });
+  await c.connect(new StdioClientTransport({
+    command: process.execPath,
+    args: [path.join(ROOT, 'src', 'shim.mjs')],
+    env: { ...process.env, MCP_GATEWAY_CONFIG: path.join(state, 'servers.json'), MCP_GATEWAY_STATE: state },
+    stderr: 'ignore',
+  }));
+  const gone = await pidOf(c, 'owner-echo');
+  const owner = (await status(c)).caller;
+  await c.close();
+  for (let i = 0; i < 20 && (await status(other)).instances.some(x => x.owner === owner); i++) await sleep(100);
+  assert.ok(!(await status(other)).instances.some(x => x.owner === owner), 'instance of the ended session still listed');
+  for (let i = 0; i < 20 && alive(gone); i++) await sleep(100);
+  assert.equal(alive(gone), false);
+  assert.equal(await pidOf(other, 'owner-echo'), kept);
+});
+
+test('cross-server search and unknown servers', async () => {
+  const a = await connect('m');
+  const found = text(await a.callTool({ name: 'list', arguments: { query: 'sleep' } }));
+  for (const s of ['shared-echo', 'owner-echo', 'client-echo', 'dir-echo']) assert.match(found, new RegExp(`- ${s} / sleep:`));
+  const r = await a.callTool({ name: 'call', arguments: { server: 'some-host', tool: 'x' } });
+  assert.ok(r.isError);
+  assert.match(text(r), /go inside "arguments"/);
 });
 
 test('token file is private to its owner', { skip: process.platform === 'win32' && 'POSIX permissions' }, () => {

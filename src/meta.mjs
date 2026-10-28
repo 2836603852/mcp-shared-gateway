@@ -28,9 +28,14 @@ export function buildInstructions(cfg) {
 
 const str = description => ({ type: 'string', description });
 
+// MCP tool annotations let clients (e.g. Codex with approvals off) run the read-only meta-tools without asking.
+const READ_ONLY = { readOnlyHint: true, openWorldHint: false };
+
 export const META_TOOLS = [
   {
     name: 'list',
+    title: 'List servers and tools',
+    annotations: READ_ONLY,
     description: 'List the servers behind the gateway; with server, list its tools (name and one-line summary); with query, search tools across servers by name and description.',
     inputSchema: {
       type: 'object',
@@ -42,6 +47,8 @@ export const META_TOOLS = [
   },
   {
     name: 'describe',
+    title: 'Describe a tool',
+    annotations: READ_ONLY,
     description: 'Return the full description and input JSON Schema of one backend tool.',
     inputSchema: {
       type: 'object',
@@ -51,6 +58,9 @@ export const META_TOOLS = [
   },
   {
     name: 'call',
+    title: 'Call a backend tool',
+    // What a call does depends on the backend tool; describe shows that tool's own annotations.
+    annotations: { readOnlyHint: false, openWorldHint: true },
     description: 'Call a backend tool and return its result unchanged (text, images, resources).',
     inputSchema: {
       type: 'object',
@@ -66,6 +76,8 @@ export const META_TOOLS = [
   },
   {
     name: 'resource',
+    title: 'List or read resources',
+    annotations: READ_ONLY,
     description: 'Without uri, list the resources a server provides; with uri, read that resource.',
     inputSchema: {
       type: 'object',
@@ -75,11 +87,15 @@ export const META_TOOLS = [
   },
   {
     name: 'status',
+    title: 'Gateway status',
+    annotations: READ_ONLY,
     description: 'Gateway process, shared browser, backend instances (server, owner, idle time, pid) and recent errors.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'reset',
+    title: 'Restart a backend',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     description: 'Stop this session\'s instance of a server (for shared servers, the machine-wide instance); it restarts on the next call.',
     inputSchema: {
       type: 'object',
