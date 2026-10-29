@@ -1,0 +1,5 @@
+PASS live Chrome: first new_page left exactly one tab
+PASS live Chrome: second new_page opened in the same session window
+PASS new shim sessionAlive, shim 53880, backend 59400
+PASS killed shim: its backend and both tabs were reclaimed; pre-existing pages preserved
+PASS gateway 43200 still running, Node v24.22.0, observed at 2026-10-29T04:47:27.570Z

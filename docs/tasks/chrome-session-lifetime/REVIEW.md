@@ -28,4 +28,10 @@
 
 时钟前跳是定向模拟休眠恢复后的过期时序，没有让本机真实休眠；没有做完整 15 分钟以上的线上保留观察。旧终端仍持有旧 shim，需要重开后才使用持续连接。父进程 PID 复用加泄漏 stdin 的复合情形未端到端复现；未用永久保留或定时强关的相反策略掩盖它。原有 isolatedContext 行为保持，未新增其隔离语义验收。
 
-提交、CI 与本机部署结果以 [CURRENT.md](CURRENT.md) 及运行仓 `.local/DEPLOYMENT.md` 的后续回读为准；本报告不把本地通过当作已经部署。
+## 提交与本机部署
+
+实现已提交推送为 `0d9eb303acac67f7977021aff97a3715a7dc12fd`；三平台 Node 22/24 共六组 [CI](https://github.com/2836603852/mcp-shared-gateway/actions/runs/40819425423) 全通过。本机运行副本已拉取同版，三份运行源码 SHA256 与开发仓一致；北京时间 12:46:47 在无后端实例时重启，网关 PID 43200，Node 24.22.0。
+
+12:47 真实共享 Chrome 的新 shim 开页/强杀回收通过，见 [live-validation.txt](live-validation.txt)（该原始输出时间为 UTC）。随后运行日志记录后端 59400 `instance.stop reason=session ended`；12:48 status 回读无实例、无近期错误。配置及浏览器用户 profile 未改动，本机中文工具说明已更新并备份；新网关和新 shim 已加载，旧客户端提示上下文与进程需重开才刷新。
+
+临时清理受自动审批规则限制，约 265 MiB 的本轮可重建文件保留；完整移交与后续入口见 [CURRENT.md](CURRENT.md) 和运行仓 `.local/DEPLOYMENT.md`。
