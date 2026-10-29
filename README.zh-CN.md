@@ -67,7 +67,8 @@ args = ["/path/to/mcp-shared-gateway/src/shim.mjs"]
 | 字段 | 含义 |
 |---|---|
 | `gateway.port` / `host` | 网关监听地址，默认 `127.0.0.1:18760`。 |
-| `gateway.idleMinutes` | 后端闲置多少分钟后关闭，默认 15。 |
+| `gateway.idleMinutes` | 后端闲置多少分钟后关闭，默认 15。客户端还在运行的会话，其 `owner` 实例不受此限，见下文。 |
+| `gateway.heartbeatSec` / `sessionMaxIdleMinutes` | shim 多久报告一次“客户端还在运行”（默认 60 秒）；以及可选的上限：这种会话的 `owner` 实例最多闲置多少分钟仍保留（默认 0，保留到会话结束）。 |
 | `gateway.proxy` / `noProxy` | 后端用的代理。要写在这里：Windows 上网关不会继承客户端的环境变量。 |
 | `gateway.defaultTimeoutSec` / `maxTimeoutSec` / `inlineTextLimit` | 调用的默认超时 120 秒、最长 900 秒；文本结果超过 40000 字符就写到文件里。 |
 | `gateway.outputDir` / `workDir` | 长结果写到哪里、后端默认的工作目录（默认是状态目录下的 `outputs/` 和 `work/`）。相对路径相对于配置文件所在目录。 |
@@ -118,7 +119,7 @@ Windows 上可以用 `mcpx.cmd` 代替 `node src/cli.mjs`。
 
 - **shim**（`src/shim.mjs`）：每个客户端挂的就是它。它不依赖 MCP SDK，`initialize` 和 `tools/list` 自己直接应答，工具调用通过本机 HTTP 转发给网关。网关没在运行时，shim 会把它拉起来。在 Windows 上是用 WMI 拉起的，所以网关不在客户端的进程树里，客户端退出也不会带走它。
 - **网关**（`src/gateway.mjs`）：后端在第一次被用到时才启动。一个实例由三部分确定：服务名、owner（共享服务用 `*`）、工作目录（只有按 `cwd` 区分的服务才算）。网关会缓存各服务的工具清单，所以 `list` 和 `describe` 不会启动后端；后端闲置超时后由网关关掉。
-- **会话结束即回收。** 客户端退出时，shim 会通知网关，网关立刻停掉这个会话的 `owner` 实例（并关掉它的浏览器窗口及其中所有标签页）。闲置的实例仍按 `idleMinutes` 回收。
+- **会话实例与会话同生命周期。** 客户端运行期间，shim 每隔 `heartbeatSec` 向网关报到一次，网关就一直保留这个会话的 `owner` 实例（浏览器窗口和标签页、选中的设备等），不管 agent 多久没调用它们。客户端退出时，shim 通知网关，网关立刻停掉这些实例（并关掉浏览器窗口及网关为它打开的标签页）。如果客户端被强制结束而 shim 的 stdin 没有关闭，shim 发现父进程已不在，也会照样结束会话。共享实例，以及没有心跳的客户端（CLI、HTTP 客户端）的 `owner` 实例，仍按 `idleMinutes` 回收。
 - **后端卡住能自动恢复。** 调用超时后，后端通常还在执行它；`owner` 实例上的调用又是按顺序执行的，所以一次卡住会让后面的调用跟着超时。连续超时两次后，网关会换掉这个会话的实例，并在报错里告诉 agent 发生了什么。
 - **只读元工具带有标注**（MCP tool annotations），关闭了审批的客户端（比如 Codex）调用 `list`、`describe`、`status`、`resource` 时不会再要求确认。`describe` 也会显示后端工具自己的标注。
 - 网关只监听 `127.0.0.1`，每个请求都要带 Bearer 令牌。令牌是随机生成的，存在 `.local/token`。
@@ -127,7 +128,6 @@ Windows 上可以用 `mcpx.cmd` 代替 `node src/cli.mjs`。
 
 - 作者每天在 Windows 11 上使用。CI 会在 Windows、Linux、macOS 上跑测试，但 Linux 和 macOS 的日常使用验证得少一些。
 - 共享服务的后端状态对所有会话是同一份。如果这会造成干扰，把这个服务改成 `owner`。
-- 客户端被强制结束、没来得及关闭 shim 的 stdin 时，它的 `owner` 实例要等闲置超时才会被关掉。
 - 共享实例超时后不会自动重启（其他会话可能正在用），需要时用 `reset`。
 
 ## 开发

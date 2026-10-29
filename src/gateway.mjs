@@ -21,6 +21,9 @@ const cfg = loadConfig();
 const G = cfg.gateway;
 const B = cfg.browser || null;
 const IDLE_MS = (Number(process.env.GW_IDLE_MINUTES) || G.idleMinutes) * 60_000;
+// A shim reports in every heartbeatSec while its client runs; three missed beats and the session counts as gone.
+const ALIVE_MS = 3 * G.heartbeatSec * 1000;
+const SESSION_MAX_IDLE_MS = (Number(G.sessionMaxIdleMinutes) || 0) * 60_000;
 const INSTRUCTIONS = buildInstructions(cfg);
 ensureDirs(cfg);
 const token = ensureToken();
@@ -31,6 +34,7 @@ const pending = new Map(); // key -> Promise of an instance being created
 const catalogPending = new Map();
 const sessions = new Map(); // MCP session id -> { transport, mcp, lastSeen }
 const rpcOwners = new Map(); // owner calling through /rpc -> lastSeen
+const heartbeats = new Map(); // owner whose shim reports in -> last heartbeat
 const recentErrors = [];
 
 function pushError(where, err) {
@@ -640,6 +644,7 @@ async function handleMeta(name, args, ctx) {
           server: i.name, owner: i.key.split('|')[1] === '*' ? '*' : i.owner, cwd: i.cwd, pid: i.pid, busy: i.busy,
           idleMin: Math.round((now - i.lastUsed) / 6000) / 10, lastTool: i.lastTool, timeouts: i.timeouts || undefined,
           window: i.windowTarget ? `pageId ${i.windowPageId ?? '?'}` : undefined,
+          sessionAlive: sessionAlive(i, now) || undefined,
         })),
         recentErrors,
       };
@@ -722,11 +727,18 @@ const httpServer = http.createServer(async (req, res) => {
       rpcOwners.set(ctx.owner, Date.now());
       return sendJson(res, 200, await runMeta(String(body.name), body.arguments || {}, ctx));
     }
+    // Sent by a shim every heartbeatSec while its client runs: keeps the session's per-session instances.
+    if (url.pathname === '/session/alive' && req.method === 'POST') {
+      const owner = String(((await readBody(req)) || {}).owner || '');
+      if (owner) heartbeats.set(owner, Date.now());
+      return sendJson(res, 200, { ok: true });
+    }
     // Sent by a shim when its client goes away: stop that session's per-session instances (and close their
     // browser windows) now instead of after the idle timeout. Shared instances keep running.
     if (url.pathname === '/session/end' && req.method === 'POST') {
       const owner = String(((await readBody(req)) || {}).owner || '');
       rpcOwners.delete(owner);
+      heartbeats.delete(owner);
       const mine = [...instances.values()].filter(i => owner && i.key.split('|')[1] === owner);
       await Promise.allSettled(mine.map(i => closeInstance(i, 'session ended')));
       log('session.end', { owner, stopped: mine.length });
@@ -777,15 +789,29 @@ function sweepOutputs() {
   }
 }
 
+// A per-session instance whose shim still reports in belongs to a running client: its browser window and
+// other state stay however long the agent works on something else (up to sessionMaxIdleMinutes, if set).
+// Clients without heartbeats (HTTP sessions, the CLI, older shims) keep the plain idle timeout.
+function sessionAlive(inst, now) {
+  return inst.serial && now - (heartbeats.get(inst.owner) ?? 0) < ALIVE_MS;
+}
+
+function reapable(inst, now) {
+  const idle = now - inst.lastUsed;
+  if (inst.busy > 0 || idle <= IDLE_MS) return false;
+  return !sessionAlive(inst, now) || (SESSION_MAX_IDLE_MS > 0 && idle > SESSION_MAX_IDLE_MS);
+}
+
 setInterval(() => {
   const now = Date.now();
   for (const inst of [...instances.values()]) {
-    if (inst.busy === 0 && now - inst.lastUsed > IDLE_MS) closeInstance(inst, 'idle').catch(err => pushError('reap', err));
+    if (reapable(inst, now)) closeInstance(inst, 'idle').catch(err => pushError('reap', err));
   }
   for (const [id, s] of sessions) {
     if (now - s.lastSeen > 12 * 3600_000) { sessions.delete(id); s.transport.close().catch(() => {}); }
   }
   for (const [owner, seen] of rpcOwners) if (now - seen > 12 * 3600_000) rpcOwners.delete(owner);
+  for (const [owner, seen] of heartbeats) if (now - seen > ALIVE_MS) heartbeats.delete(owner);
 }, Math.min(60_000, Math.max(1_000, IDLE_MS / 2))).unref();
 setInterval(sweepOutputs, 3600_000).unref();
 

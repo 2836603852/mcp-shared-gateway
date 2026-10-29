@@ -12,7 +12,7 @@ Conventions:
 - Each client session is one owner. Servers with scope "owner" get one instance per session (main agent and sub-agents of that session share it); servers with scope "shared" run one instance for the whole machine, called concurrently, and all sessions see the same backend state.
 - Text results longer than the inline limit are written to a file; the reply contains the path and the beginning.
 - If a write operation times out or its result is unclear, check the target state before retrying.
-- Idle backends are stopped after a while and restart automatically on the next call.`;
+- A session's per-session instances (its browser window, selected device, …) are kept until the session ends; shared backends are stopped when idle. Both restart automatically on the next call.`;
 
 const BROWSER = `- Browser servers attach to one shared browser (shared logins). Each session gets its own window, preselected for it; keep all your pages in that one window as tabs. Reuse the current tab (navigate) when the old page is no longer needed; for pages that must stay open side by side use new_page with background: true, which the gateway opens as a tab in your window and selects. Do not open other windows (isolated contexts open one; use them only when a separate login state is required). Switch between your tabs with select_page, never close, navigate or select other sessions' pages, and close the tabs you opened when done.`;
 

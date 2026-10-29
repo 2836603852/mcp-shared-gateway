@@ -45,7 +45,7 @@ const status = async c => JSON.parse(text(await c.callTool({ name: 'status', arg
 before(async () => {
   const echo = { command: process.execPath, args: [FIXTURE] };
   fs.writeFileSync(path.join(state, 'servers.json'), JSON.stringify({
-    gateway: { port: PORT, outputDir: 'spilled', inlineTextLimit: 1000, dropEnv: ['GW_TEST_DROP'], clientAliases: { '^test$': 'aliased' } },
+    gateway: { port: PORT, heartbeatSec: 1, outputDir: 'spilled', inlineTextLimit: 1000, dropEnv: ['GW_TEST_DROP'], clientAliases: { '^test$': 'aliased' } },
     servers: {
       'shared-echo': { description: 'fixture', scope: 'shared', ...echo },
       'owner-echo': { description: 'fixture', scope: 'owner', ...echo },
@@ -182,6 +182,77 @@ test('when a shim exits, its per-session instances stop; other sessions keep the
   for (let i = 0; i < 20 && alive(gone); i++) await sleep(100);
   assert.equal(alive(gone), false);
   assert.equal(await pidOf(other, 'owner-echo'), kept);
+});
+
+test('a running shim keeps its per-session instance past the idle timeout; a session without heartbeats does not', async () => {
+  const quiet = await connect('n');
+  const reaped = await pidOf(quiet, 'owner-echo');
+  const c = new Client({ name: 'shim-alive', version: '0' }, { capabilities: {} });
+  await c.connect(new StdioClientTransport({
+    command: process.execPath,
+    args: [path.join(ROOT, 'src', 'shim.mjs')],
+    env: { ...process.env, MCP_GATEWAY_CONFIG: path.join(state, 'servers.json'), MCP_GATEWAY_STATE: state },
+    stderr: 'ignore',
+  }));
+  try {
+    const kept = await pidOf(c, 'owner-echo');
+    await sleep(6000); // GW_IDLE_MINUTES is 3 s
+    assert.ok((await status(c)).instances.some(i => i.pid === kept && i.sessionAlive), 'instance of the live session was stopped');
+    assert.equal(await pidOf(c, 'owner-echo'), kept);
+    assert.equal(alive(reaped), false, 'instance without heartbeats still running');
+  } finally {
+    await c.close();
+  }
+});
+
+test('a shim whose client died without closing its stdin ends its session', async () => {
+  // The parent hands its stdin to the shim, then gets killed. That stdin is a local socket this test keeps
+  // open (Node would close a 'pipe' it created when the parent exits), so the shim's stdin stays open, the
+  // way it does when the pipe leaked into another process. detached keeps the shim out of the parent's
+  // kill-on-close job on Windows.
+  const where = process.platform === 'win32' ? path.join('\\\\?\\pipe', `gw-test-${process.pid}`) : path.join(state, 'stdin.sock');
+  const srv = net.createServer();
+  const accepted = new Promise(resolve => srv.once('connection', resolve));
+  await new Promise(resolve => srv.listen(where, resolve));
+  const stdin = net.connect(where);
+  const held = await accepted;
+  const launcher = `const c = require('node:child_process').spawn(process.execPath, [${JSON.stringify(path.join(ROOT, 'src', 'shim.mjs'))}], { stdio: 'inherit', detached: true, windowsHide: true });
+console.log(JSON.stringify({ shim: c.pid })); setInterval(() => {}, 1e9);`;
+  const parent = spawn(process.execPath, ['-e', launcher], {
+    env: { ...process.env, MCP_GATEWAY_CONFIG: path.join(state, 'servers.json'), MCP_GATEWAY_STATE: state },
+    stdio: [held, 'pipe', 'ignore'],
+    windowsHide: true,
+  });
+  const lines = [];
+  let buf = '';
+  parent.stdout.on('data', d => {
+    buf += d;
+    for (let i; (i = buf.indexOf('\n')) >= 0; buf = buf.slice(i + 1)) lines.push(JSON.parse(buf.slice(0, i)));
+  });
+  const next = async pred => {
+    for (let i = 0; i < 100; i++) { const m = lines.find(pred); if (m) return m; await sleep(100); }
+    throw new Error('no answer from the shim');
+  };
+  const rpc = (id, method, params) => stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+  try {
+    const shim = (await next(m => m.shim)).shim;
+    rpc(1, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'orphan', version: '0' } });
+    await next(m => m.id === 1);
+    rpc(2, 'tools/call', { name: 'call', arguments: { server: 'owner-echo', tool: 'pid' } });
+    const backend = Number((await next(m => m.id === 2)).result.content[0].text);
+    assert.ok(alive(backend));
+    parent.kill();
+    // Within 2.5 s: before the 3 s idle timeout could stop the backend on its own.
+    for (let i = 0; i < 25 && (alive(shim) || alive(backend)); i++) await sleep(100);
+    assert.equal(alive(shim), false, 'shim still running');
+    assert.equal(alive(backend), false, 'instance of the ended session still running');
+  } finally {
+    parent.kill();
+    for (const m of lines) if (m.shim && alive(m.shim)) process.kill(m.shim);
+    stdin.destroy();
+    held.destroy();
+    srv.close();
+  }
 });
 
 test('cross-server search and unknown servers', async () => {

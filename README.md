@@ -67,7 +67,8 @@ Anything that takes `mcpServers` JSON (Cursor, Claude Desktop, …):
 | Key | Meaning |
 |---|---|
 | `gateway.port` / `host` | Where the gateway listens (default `127.0.0.1:18760`). |
-| `gateway.idleMinutes` | Stop a backend after this many idle minutes (default 15). |
+| `gateway.idleMinutes` | Stop a backend after this many idle minutes (default 15). `owner` instances of a session whose client is still running are kept, see below. |
+| `gateway.heartbeatSec` / `sessionMaxIdleMinutes` | How often a shim reports that its client is still running (default 60 s), and an optional limit on how long such a session's idle `owner` instances are kept anyway (default 0: until the session ends). |
 | `gateway.proxy` / `noProxy` | Proxy for backends. Set it here: on Windows the gateway does not inherit the client's environment. |
 | `gateway.defaultTimeoutSec` / `maxTimeoutSec` / `inlineTextLimit` | Call timeouts (120 / 900 s) and the size above which long text results are written to a file (40 000 chars). |
 | `gateway.outputDir` / `workDir` | Where long results are written and the default working directory of backends (default `outputs/` and `work/` in the state directory). Relative paths are relative to the config file. |
@@ -118,7 +119,7 @@ To update: `git pull --ff-only`, then `node src/cli.mjs stop` when no session is
 
 - **shim** (`src/shim.mjs`): the stdio server each client mounts. It has no MCP SDK dependency, answers `initialize` and `tools/list` itself, and forwards tool calls to the gateway over localhost HTTP. If the gateway is not running, the shim starts it. On Windows it uses WMI, so the gateway is outside the client's process tree and outlives it.
 - **gateway** (`src/gateway.mjs`): starts backends on first use. An instance is identified by server name + owner (or `*` when shared) + directory (when keyed by `cwd`). It caches tool lists, so `list` and `describe` don't start anything, and it stops idle backends.
-- **Sessions end cleanly.** When a client exits, its shim tells the gateway, which stops that session's `owner` instances (and closes its browser window with all its tabs) right away. Idle instances are still stopped after `idleMinutes`.
+- **Per-session instances live as long as the session.** While its client runs, the shim reports in every `heartbeatSec`, and the gateway keeps that session's `owner` instances (its browser window and tabs, a selected device, …) however long the agent works on something else. When the client exits, the shim tells the gateway, which stops them (and closes the browser window with the tabs it opened) right away. If the client was killed but the shim's stdin stayed open, the shim notices that its parent process is gone and ends the session the same way. Shared instances, and `owner` instances of clients without heartbeats (the CLI, HTTP clients), are stopped after `idleMinutes`.
 - **Stuck backends recover.** A timed-out call usually keeps running in the backend, and calls on an `owner` instance run in order, so one stuck call makes the next ones time out too. After two timeouts in a row the gateway replaces that session's instance. The error text tells the agent what happened.
 - **Read-only meta-tools are marked as such** (MCP tool annotations), so clients with approvals turned off, such as Codex, can run `list`, `describe`, `status` and `resource` without asking. `describe` also shows the backend tool's own annotations.
 - Requests need a random Bearer token stored in `.local/token`, and the gateway only listens on `127.0.0.1`.
@@ -127,7 +128,6 @@ To update: `git pull --ff-only`, then `node src/cli.mjs stop` when no session is
 
 - Used daily on Windows 11. CI runs the tests on Windows, Linux and macOS, but day-to-day use on Linux and macOS is less tested.
 - All sessions using a shared server see the same backend state. Switch such servers to `owner` if that matters.
-- If a client is killed without closing the shim's stdin, its `owner` instances are only stopped after the idle timeout.
 - Shared instances are never restarted automatically after timeouts (other sessions may be using them); use `reset`.
 
 ## Development

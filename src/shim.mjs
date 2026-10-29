@@ -65,6 +65,8 @@ async function handle(msg) {
     case 'initialize': {
       const client = (params.clientInfo?.name || 'unknown').replace(/[\/|\s]+/g, '_');
       owner = `gw-shim/${client}/${SHIM_ID}`;
+      initialized = true;
+      reportAlive();
       const asked = params.protocolVersion;
       return send({
         id,
@@ -97,9 +99,34 @@ rl.on('line', line => {
   try { msg = JSON.parse(line); } catch { return send({ id: null, error: { code: -32700, message: 'Parse error' } }); }
   handle(msg).catch(err => msg.id !== undefined && send({ id: msg.id, error: { code: -32603, message: err.message } }));
 });
+// While the client runs, report in so the gateway keeps this session's instances (browser window etc.) no
+// matter how long the agent goes without calling them. Errors are ignored: a gateway that is not running
+// has nothing to keep, and older gateways answer 404.
+let initialized = false;
+const reportAlive = () => post(`${gatewayUrl(cfg)}/session/alive`, { owner }, 3000).catch(() => {});
+
+// A client killed without closing our stdin would leave this shim, and its heartbeats, behind. Watch the
+// parent (only if it was alive at start: some launchers exit right away) and end the session when it is gone.
+const PARENT = process.ppid;
+const parentAlive = () => {
+  if (process.ppid !== PARENT) return false;
+  try { process.kill(PARENT, 0); return true; } catch (err) { return err.code === 'EPERM'; }
+};
+const watchParent = parentAlive();
+const heartbeat = setInterval(() => {
+  if (watchParent && !parentAlive()) return endSession();
+  if (initialized) reportAlive();
+}, cfg.gateway.heartbeatSec * 1000);
+heartbeat.unref();
+
 // The client is gone: let the gateway stop this session's instances right away (best effort, 1 s at most).
-rl.on('close', () => {
+let ending = false;
+function endSession() {
+  if (ending) return;
+  ending = true;
+  clearInterval(heartbeat);
   post(`${gatewayUrl(cfg)}/session/end`, { owner }, 1000).catch(() => {}).finally(() => process.exit(0));
-});
+}
+rl.on('close', endSession);
 // Warm up without blocking initialize; the gateway is usually ready before the first call.
 ensureGateway(cfg).catch(err => process.stderr.write(`[mcp-shared-gateway] ${err.message}\n`));

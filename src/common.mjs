@@ -18,6 +18,8 @@ const GATEWAY_DEFAULTS = {
   host: '127.0.0.1',
   port: 18760,
   idleMinutes: 15,
+  heartbeatSec: 60,
+  sessionMaxIdleMinutes: 0,
   inlineTextLimit: 40000,
   defaultTimeoutSec: 120,
   maxTimeoutSec: 900,
@@ -58,6 +60,7 @@ export function loadConfig() {
   const cfg = substitute(raw, readJson(SECRETS_FILE, {}));
   const G = cfg.gateway = { ...GATEWAY_DEFAULTS, ...(cfg.gateway || {}) };
   cfg.servers = cfg.servers || {};
+  G.heartbeatSec = Math.max(1, Number(G.heartbeatSec) || GATEWAY_DEFAULTS.heartbeatSec);
   // Relative paths in the gateway section are relative to the config file.
   const here = p => path.resolve(path.dirname(CONFIG_FILE), p);
   G.outputDir = G.outputDir ? here(G.outputDir) : path.join(STATE_DIR, 'outputs');
