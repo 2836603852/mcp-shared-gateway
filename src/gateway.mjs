@@ -239,6 +239,7 @@ async function setupWindow(inst) {
   const win = await browser.openWindow(marker);
   inst.windowTarget = win.targetId;
   inst.windowId = win.windowId;
+  inst.windowMarker = marker;
   inst.ownTargets.add(win.targetId);
   const pageId = await findPageId(inst.mcp, marker);
   if (pageId == null) throw new Error('New window did not show up in list_pages');
@@ -259,12 +260,8 @@ async function findPageId(mcp, marker) {
   return null;
 }
 
-// new_page in the session's own window: open a marked tab from one of the window's pages, select it, then
-// navigate it. Returns null (and the caller falls back to the backend's new_page) when that is not possible.
-async function newPageInWindow(inst, mcp, a, timeoutMs) {
-  if (inst.windowId == null || a.isolatedContext !== undefined || typeof a.url !== 'string') return null;
-  const [opener] = (await browser.pagesIn(inst.windowId, inst.windowTarget).catch(() => [])).map(t => t.targetId);
-  if (!opener) return null;
+// A marked tab opened next to page `opener`; returns its chrome-devtools-mcp page id, or null.
+async function openTab(inst, mcp, opener) {
   const marker = `gw-tab-${crypto.randomBytes(4).toString('hex')}`;
   inst.tabMarkers.push(marker);
   try {
@@ -277,15 +274,27 @@ async function newPageInWindow(inst, mcp, a, timeoutMs) {
   // Tracked even when it never showed up in list_pages, so the window's teardown still closes it.
   const tab = (await browser.cdp('Target.getTargets').catch(() => ({ targetInfos: [] }))).targetInfos.find(t => t.url.includes(marker));
   if (tab) inst.ownTargets.add(tab.targetId);
-  if (pageId == null) {
-    pushError(`${inst.name}.new_page`, `tab ${marker} did not show up in list_pages`);
-    return null;
-  }
+  if (pageId == null) pushError(`${inst.name}.new_page`, `tab ${marker} did not show up in list_pages`);
+  return pageId;
+}
+
+// new_page in the session's own window: use the window's blank start tab while nothing has been loaded in it
+// (otherwise it would stay open next to the new tab), else open a marked tab from one of the window's pages;
+// then select and navigate it. Returns null (and the caller falls back to the backend's new_page) when that
+// is not possible.
+async function newPageInWindow(inst, mcp, a, timeoutMs) {
+  if (inst.windowId == null || a.isolatedContext !== undefined || typeof a.url !== 'string') return null;
+  const [first] = await browser.pagesIn(inst.windowId, inst.windowTarget).catch(() => []);
+  if (!first) return null;
+  const startTab = first.targetId === inst.windowTarget && first.url === `about:blank#${inst.windowMarker}`;
+  const pageId = startTab ? await findPageId(mcp, inst.windowMarker) : await openTab(inst, mcp, first.targetId);
+  if (pageId == null) return null;
   await mcp.callTool({ name: 'select_page', arguments: { pageId, bringToFront: !a.background } }, undefined, { timeout: 30_000 });
   const nav = { type: 'url', url: a.url, ...(a.timeout ? { timeout: a.timeout } : {}) };
   const r = await mcp.callTool({ name: 'navigate_page', arguments: nav }, undefined,
     { timeout: timeoutMs, resetTimeoutOnProgress: true, maxTotalTimeout: G.maxTimeoutSec * 1000 });
-  const note = { type: 'text', text: `Opened as page ${pageId}, a new tab in this session's window, and selected it.` };
+  const where = startTab ? "the blank start tab of this session's window" : "a new tab in this session's window";
+  const note = { type: 'text', text: `Opened as page ${pageId}, ${where}, and selected it.` };
   return { ...r, content: [note, ...(r.content || [])] };
 }
 
