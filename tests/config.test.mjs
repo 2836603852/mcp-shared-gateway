@@ -75,3 +75,8 @@ test('${NAME} comes from state/secrets.json before the environment; unknown name
   }, { 'state/secrets.json': JSON.stringify({ GW_TEST_SECRET: 'from-file', FROM_FILE: 'f' }) });
   assert.deepEqual(r.servers.d.headers, { A: 'from-file', B: 'f', C: '${NOT_SET_ANYWHERE}' });
 });
+
+test('heartbeat delays stay within the Node timer range and invalid values use the default', () => {
+  for (const input of [0, -1, 'bad', 'Infinity']) assert.equal(load({ gateway: { heartbeatSec: input } }).gateway.heartbeatSec, 60);
+  assert.equal(load({ gateway: { heartbeatSec: 1e20 } }).gateway.heartbeatSec, 2147483);
+});

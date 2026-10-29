@@ -1,0 +1,2 @@
+PASS new shim fell back to heartbeat on 5f5f1d1 gateway and kept the instance beyond the 3 s idle limit
+PASS old gateway reclaimed the instance after the new shim exited

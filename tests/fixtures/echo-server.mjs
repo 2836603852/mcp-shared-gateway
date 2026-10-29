@@ -1,6 +1,7 @@
 // Minimal stdio MCP server used by the tests: report which process answered, sleep (for timeout checks),
 // read an env var, return a long text, show its argv, or start a child process (for process-tree cleanup).
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -28,4 +29,6 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
   }
   return { content: [{ type: 'text', text: String(process.pid) }] };
 });
+if (process.env.GW_TEST_PID_FILE) fs.writeFileSync(process.env.GW_TEST_PID_FILE, String(process.pid));
+if (process.env.GW_TEST_STARTUP_MS) await new Promise(r => setTimeout(r, Number(process.env.GW_TEST_STARTUP_MS)));
 await server.connect(new StdioServerTransport());

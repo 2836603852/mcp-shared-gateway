@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -42,6 +42,17 @@ const pidOf = async (c, server) => {
 };
 const status = async c => JSON.parse(text(await c.callTool({ name: 'status', arguments: {} })));
 
+async function connectShim(name, config = path.join(state, 'servers.json')) {
+  const c = new Client({ name, version: '0' }, { capabilities: {} });
+  const transport = new StdioClientTransport({
+    command: process.execPath, args: [path.join(ROOT, 'src', 'shim.mjs')],
+    env: { ...process.env, MCP_GATEWAY_CONFIG: config, MCP_GATEWAY_STATE: state }, stderr: 'ignore',
+  });
+  await c.connect(transport);
+  clients.push(c);
+  return { c, transport };
+}
+
 before(async () => {
   const echo = { command: process.execPath, args: [FIXTURE] };
   fs.writeFileSync(path.join(state, 'servers.json'), JSON.stringify({
@@ -51,12 +62,14 @@ before(async () => {
       'owner-echo': { description: 'fixture', scope: 'owner', ...echo },
       'client-echo': { description: 'fixture', scope: 'owner', ...echo, clientEnv: { GW_TEST_CLIENT: '${CLIENT}' } },
       'dir-echo': { description: 'fixture', scope: 'shared', cwd: 'key', cwdArgs: ['--dir', '${CWD}'], ...echo },
+      'slow-echo': { description: 'fixture', scope: 'owner', ...echo, env: { GW_TEST_STARTUP_MS: '1000', GW_TEST_PID_FILE: path.join(state, 'slow-pid') } },
     },
   }));
-  gateway = spawn(process.execPath, [path.join(ROOT, 'src', 'gateway.mjs')], {
+  gateway = spawn(process.execPath, ['--import', pathToFileURL(path.join(ROOT, 'tests', 'fixtures', 'clock.mjs')).href, path.join(ROOT, 'src', 'gateway.mjs')], {
     env: {
       ...process.env, MCP_GATEWAY_CONFIG: path.join(state, 'servers.json'), MCP_GATEWAY_STATE: state, GW_IDLE_MINUTES: '0.05',
       GW_TEST_DROP: 'leaked', GW_TEST_KEEP: 'kept', ZCODE_TEST: 'leaked',
+      GW_TEST_CLOCK: path.join(state, 'clock'),
     },
     stdio: 'ignore',
     windowsHide: true,
@@ -202,6 +215,111 @@ test('a running shim keeps its per-session instance past the idle timeout; a ses
     assert.equal(alive(reaped), false, 'instance without heartbeats still running');
   } finally {
     await c.close();
+  }
+});
+
+test('a held session survives a forward clock jump and a different shim heartbeat setting', async () => {
+  const config = JSON.parse(fs.readFileSync(path.join(state, 'servers.json'), 'utf8'));
+  config.gateway.heartbeatSec = 60; // gateway is running with 1 s
+  const file = path.join(state, 'slow-shim.json');
+  fs.writeFileSync(file, JSON.stringify(config));
+  const { c } = await connectShim('clock-jump', file);
+  try {
+    const kept = await pidOf(c, 'owner-echo');
+    const mine = (await status(c)).caller;
+    fs.writeFileSync(path.join(state, 'clock'), '3600000');
+    await sleep(4500); // beyond idle timeout and the old gateway's heartbeat lease
+    assert.ok((await status(c)).instances.some(i => i.pid === kept && i.sessionAlive), 'live instance was reaped after the clock jump');
+    assert.equal(await pidOf(c, 'owner-echo'), kept);
+    assert.match(mine, /clock-jump/);
+  } finally {
+    await c.close();
+    fs.writeFileSync(path.join(state, 'clock'), '0');
+  }
+});
+
+test('hard-killing a shim closes its session before the ordinary idle timeout', async () => {
+  const { c, transport } = await connectShim('hard-kill');
+  const backend = await pidOf(c, 'owner-echo');
+  assert.ok(transport.pid);
+  process.kill(transport.pid);
+  for (let i = 0; i < 20 && alive(backend); i++) await sleep(100);
+  assert.equal(alive(backend), false, 'backend survived the killed shim');
+});
+
+const postSession = (endpoint, owner, extra = {}) => fetch(`${URL_BASE}/session/${endpoint}`, {
+  method: 'POST', headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+  body: JSON.stringify({ owner, ...extra }),
+});
+
+test('replacing a session connection does not close its instances; closing the replacement does', async () => {
+  const c = await connect('replacement');
+  const owner = (await status(c)).caller;
+  const a = await postSession('connect', owner);
+  const b = await postSession('connect', owner);
+  try {
+    assert.equal(a.status, 200);
+    assert.equal(b.status, 200);
+    await a.body.cancel();
+    const backend = await pidOf(c, 'owner-echo');
+    assert.ok((await status(c)).instances.some(i => i.pid === backend && i.sessionAlive));
+    await b.body.cancel();
+    for (let i = 0; i < 20 && alive(backend); i++) await sleep(100);
+    assert.equal(alive(backend), false);
+  } finally {
+    await b.body.cancel().catch(() => {});
+  }
+});
+
+test('a session ending during backend startup leaves no late backend process', async () => {
+  const { c, transport } = await connectShim('cold-exit');
+  const started = c.callTool({ name: 'call', arguments: { server: 'slow-echo', tool: 'pid' } }).catch(() => {});
+  const file = path.join(state, 'slow-pid');
+  try {
+    for (let i = 0; i < 40 && !fs.existsSync(file); i++) await sleep(50);
+    assert.ok(fs.existsSync(file), 'slow fixture did not start');
+    const backend = Number(fs.readFileSync(file, 'utf8'));
+    process.kill(transport.pid);
+    await started;
+    for (let i = 0; i < 25 && alive(backend); i++) await sleep(100);
+    assert.equal(alive(backend), false, 'backend finished starting after its session ended');
+  } finally {
+    await c.close().catch(() => {});
+  }
+});
+
+test('legacy heartbeats remain supported and a supplied lease is independent of gateway heartbeatSec', async () => {
+  const c = await connect('legacy');
+  const owner = (await status(c)).caller;
+  await (await postSession('alive', owner, { ttlMs: 8000 })).json();
+  const kept = await pidOf(c, 'owner-echo');
+  await sleep(4500);
+  assert.ok((await status(c)).instances.some(i => i.pid === kept && i.sessionAlive));
+  await (await postSession('end', owner)).json();
+  for (let i = 0; i < 20 && alive(kept); i++) await sleep(100);
+  assert.equal(alive(kept), false);
+});
+
+test('reconnecting during cold-start cleanup cannot close the replacement instance', async () => {
+  const c = await connect('reconnect-startup');
+  const owner = (await status(c)).caller;
+  const a = await postSession('connect', owner);
+  const file = path.join(state, 'slow-pid');
+  fs.rmSync(file, { force: true });
+  const oldCall = c.callTool({ name: 'call', arguments: { server: 'slow-echo', tool: 'pid' } }).catch(() => {});
+  for (let i = 0; i < 40 && !fs.existsSync(file); i++) await sleep(50);
+  assert.ok(fs.existsSync(file));
+  await a.body.cancel();
+  await sleep(100); // cleanup is now waiting for slow-echo's initialize
+  const b = await postSession('connect', owner);
+  try {
+    const kept = await pidOf(c, 'owner-echo');
+    await oldCall;
+    await sleep(300);
+    assert.ok(alive(kept), 'cleanup of the old connection closed the replacement backend');
+    assert.equal(await pidOf(c, 'owner-echo'), kept);
+  } finally {
+    await b.body.cancel();
   }
 });
 

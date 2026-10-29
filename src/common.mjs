@@ -60,7 +60,9 @@ export function loadConfig() {
   const cfg = substitute(raw, readJson(SECRETS_FILE, {}));
   const G = cfg.gateway = { ...GATEWAY_DEFAULTS, ...(cfg.gateway || {}) };
   cfg.servers = cfg.servers || {};
-  G.heartbeatSec = Math.max(1, Number(G.heartbeatSec) || GATEWAY_DEFAULTS.heartbeatSec);
+  const beat = Number(G.heartbeatSec);
+  G.heartbeatSec = Number.isFinite(beat) && beat > 0
+    ? Math.min(Math.max(1, beat), Math.floor(2 ** 31 / 1000)) : GATEWAY_DEFAULTS.heartbeatSec;
   // Relative paths in the gateway section are relative to the config file.
   const here = p => path.resolve(path.dirname(CONFIG_FILE), p);
   G.outputDir = G.outputDir ? here(G.outputDir) : path.join(STATE_DIR, 'outputs');

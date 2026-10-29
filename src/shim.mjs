@@ -47,6 +47,7 @@ async function forward(name, args) {
   for (let attempt = 0; ; attempt++) {
     try {
       await ensureGateway(cfg);
+      await keepSession();
       // 90 extra seconds for backend cold start and browser launch.
       return await post(`${gatewayUrl(cfg)}/rpc`, { owner, name, arguments: args }, (sec + 90) * 1000);
     } catch (err) {
@@ -66,7 +67,7 @@ async function handle(msg) {
       const client = (params.clientInfo?.name || 'unknown').replace(/[\/|\s]+/g, '_');
       owner = `gw-shim/${client}/${SHIM_ID}`;
       initialized = true;
-      reportAlive();
+      keepSession().catch(() => {});
       const asked = params.protocolVersion;
       return send({
         id,
@@ -99,13 +100,64 @@ rl.on('line', line => {
   try { msg = JSON.parse(line); } catch { return send({ id: null, error: { code: -32700, message: 'Parse error' } }); }
   handle(msg).catch(err => msg.id !== undefined && send({ id: msg.id, error: { code: -32603, message: err.message } }));
 });
-// While the client runs, report in so the gateway keeps this session's instances (browser window etc.) no
-// matter how long the agent goes without calling them. Errors are ignored: a gateway that is not running
-// has nothing to keep, and older gateways answer 404.
+// One held-open response ties owner instances to the actual shim process, including abrupt exits.
+// Fall back to heartbeats when talking to an older gateway during an upgrade.
 let initialized = false;
-const reportAlive = () => post(`${gatewayUrl(cfg)}/session/alive`, { owner }, 3000).catch(() => {});
+let ending = false;
+let presence = null;
+let connecting = null;
+let retry = null;
+let legacy = false;
+const reportAlive = () => post(`${gatewayUrl(cfg)}/session/alive`, { owner, ttlMs: 3 * cfg.gateway.heartbeatSec * 1000 }, 3000).catch(() => {});
 
-// A client killed without closing our stdin would leave this shim, and its heartbeats, behind. Watch the
+function keepSession() {
+  if (ending || !initialized) return Promise.resolve();
+  if (connecting) return connecting;
+  if (presence) return Promise.resolve();
+  if (legacy) return reportAlive();
+  connecting = (async () => {
+    await ensureGateway(cfg);
+    if (ending) return;
+    await new Promise((resolve, reject) => {
+      const data = Buffer.from(JSON.stringify({ owner }));
+      const req = http.request(`${gatewayUrl(cfg)}/session/connect`, {
+        method: 'POST', agent: false,
+        headers: { Authorization: `Bearer ${readToken()}`, 'content-type': 'application/json', 'content-length': data.length },
+      });
+      presence = req;
+      const lost = () => {
+        if (presence !== req) return;
+        presence = null;
+        if (!ending && !legacy) {
+          clearTimeout(retry);
+          retry = setTimeout(() => keepSession().catch(() => {}), 1000);
+          retry.unref();
+        }
+      };
+      req.setTimeout(5000, () => req.destroy(new Error('Session connection timed out')));
+      req.on('error', reject);
+      req.on('close', lost);
+      req.on('response', res => {
+        req.setTimeout(0);
+        res.on('error', () => {});
+        res.on('close', lost);
+        res.resume();
+        if (res.statusCode === 404) {
+          legacy = true;
+          presence = null;
+          reportAlive().then(resolve);
+        } else if (res.statusCode !== 200) {
+          req.destroy();
+          reject(new Error(`Session connection failed: HTTP ${res.statusCode}`));
+        } else resolve();
+      });
+      req.end(data);
+    });
+  })().finally(() => { connecting = null; });
+  return connecting;
+}
+
+// A client killed without closing our stdin would leave this shim and its connection behind. Watch the
 // parent (only if it was alive at start: some launchers exit right away) and end the session when it is gone.
 const PARENT = process.ppid;
 const parentAlive = () => {
@@ -113,18 +165,24 @@ const parentAlive = () => {
   try { process.kill(PARENT, 0); return true; } catch (err) { return err.code === 'EPERM'; }
 };
 const watchParent = parentAlive();
-const heartbeat = setInterval(() => {
+const monitor = setInterval(() => {
   if (watchParent && !parentAlive()) return endSession();
-  if (initialized) reportAlive();
+  if (initialized && !presence && !legacy) keepSession().catch(() => {});
+}, 1000);
+monitor.unref();
+const legacyHeartbeat = setInterval(() => {
+  if (initialized && legacy) reportAlive();
 }, cfg.gateway.heartbeatSec * 1000);
-heartbeat.unref();
+legacyHeartbeat.unref();
 
 // The client is gone: let the gateway stop this session's instances right away (best effort, 1 s at most).
-let ending = false;
 function endSession() {
   if (ending) return;
   ending = true;
-  clearInterval(heartbeat);
+  clearInterval(monitor);
+  clearInterval(legacyHeartbeat);
+  clearTimeout(retry);
+  presence?.destroy();
   post(`${gatewayUrl(cfg)}/session/end`, { owner }, 1000).catch(() => {}).finally(() => process.exit(0));
 }
 rl.on('close', endSession);

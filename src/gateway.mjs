@@ -21,7 +21,7 @@ const cfg = loadConfig();
 const G = cfg.gateway;
 const B = cfg.browser || null;
 const IDLE_MS = (Number(process.env.GW_IDLE_MINUTES) || G.idleMinutes) * 60_000;
-// A shim reports in every heartbeatSec while its client runs; three missed beats and the session counts as gone.
+// Legacy shims report every heartbeatSec; current shims hold a connection instead of an expiring lease.
 const ALIVE_MS = 3 * G.heartbeatSec * 1000;
 const SESSION_MAX_IDLE_MS = (Number(G.sessionMaxIdleMinutes) || 0) * 60_000;
 const INSTRUCTIONS = buildInstructions(cfg);
@@ -34,7 +34,10 @@ const pending = new Map(); // key -> Promise of an instance being created
 const catalogPending = new Map();
 const sessions = new Map(); // MCP session id -> { transport, mcp, lastSeen }
 const rpcOwners = new Map(); // owner calling through /rpc -> lastSeen
-const heartbeats = new Map(); // owner whose shim reports in -> last heartbeat
+const heartbeats = new Map(); // legacy owner -> lease expiry
+const connections = new Map(); // owner -> held-open response; survives sleep without a wall-clock lease
+const endedOwners = new Map(); // reject calls still arriving after a session ended
+const closingOwners = new Map(); // reconnects wait until the old generation has finished cleaning up
 const recentErrors = [];
 
 function pushError(where, err) {
@@ -240,6 +243,7 @@ async function setupWindow(inst) {
   inst.windowTarget = win.targetId;
   inst.windowId = win.windowId;
   inst.windowMarker = marker;
+  inst.startTabUsed = false;
   inst.ownTargets.add(win.targetId);
   const pageId = await findPageId(inst.mcp, marker);
   if (pageId == null) throw new Error('New window did not show up in list_pages');
@@ -280,15 +284,21 @@ async function openTab(inst, mcp, opener) {
 
 // new_page in the session's own window: use the window's blank start tab while nothing has been loaded in it
 // (otherwise it would stay open next to the new tab), else open a marked tab from one of the window's pages;
-// then select and navigate it. Returns null (and the caller falls back to the backend's new_page) when that
-// is not possible.
+// then select and navigate it. Unsupported argument shapes and isolated contexts use native new_page;
+// failures in a managed window must not fall back to Chrome's last active (possibly foreign) window.
 async function newPageInWindow(inst, mcp, a, timeoutMs) {
-  if (inst.windowId == null || a.isolatedContext !== undefined || typeof a.url !== 'string') return null;
-  const [first] = await browser.pagesIn(inst.windowId, inst.windowTarget).catch(() => []);
-  if (!first) return null;
-  const startTab = first.targetId === inst.windowTarget && first.url === `about:blank#${inst.windowMarker}`;
+  if (a.isolatedContext !== undefined || typeof a.url !== 'string') return null;
+  if (inst.windowId == null) throw new Error('Session window is not ready; reset this browser instance and retry');
+  let [first] = await browser.pagesIn(inst.windowId, inst.windowTarget);
+  if (!first) {
+    await setupWindow(inst);
+    [first] = await browser.pagesIn(inst.windowId, inst.windowTarget);
+  }
+  if (!first) throw new Error('Session window has no page available to open a tab');
+  const startTab = !inst.startTabUsed && first.targetId === inst.windowTarget && first.url === `about:blank#${inst.windowMarker}`;
   const pageId = startTab ? await findPageId(mcp, inst.windowMarker) : await openTab(inst, mcp, first.targetId);
-  if (pageId == null) return null;
+  if (pageId == null) throw new Error('Could not open a tab in this session window; check for a dialog or a blocked page and retry');
+  inst.startTabUsed = true;
   await mcp.callTool({ name: 'select_page', arguments: { pageId, bringToFront: !a.background } }, undefined, { timeout: 30_000 });
   const nav = { type: 'url', url: a.url, ...(a.timeout ? { timeout: a.timeout } : {}) };
   const r = await mcp.callTool({ name: 'navigate_page', arguments: nav }, undefined,
@@ -371,6 +381,10 @@ async function createInstance(name, def, key, ctx, cwd, { catalogOnly = false } 
   if (def.browser) {
     try { await setupWindow(inst); } catch (err) { pushError(`${name}.window`, err); }
   }
+  if (inst.serial && endedOwners.has(ctx.owner)) {
+    await closeInstance(inst, 'session ended during startup');
+    throw new Error('Session ended during backend startup');
+  }
   return inst;
 }
 
@@ -415,6 +429,7 @@ async function getInstance(name, def, ctx, cwd) {
 // shared instances run concurrently.
 function runOn(inst, fn) {
   const exec = async () => {
+    if (inst.closed) throw new Error('Backend instance has closed; retry in a live session');
     inst.busy++;
     inst.lastUsed = Date.now();
     try {
@@ -601,6 +616,12 @@ async function handleMeta(name, args, ctx) {
         const result = await runOn(inst, async mcp => {
           started = Date.now();
           inst.lastTool = args.tool;
+          // Observing the blank page is harmless. Other tools may write content or change emulation
+          // without changing its URL, so it is no longer a spare tab after those calls.
+          if (def.browser && !['new_page', 'list_pages', 'select_page', 'take_snapshot', 'take_screenshot',
+            'list_network_requests', 'get_network_request', 'list_console_messages', 'get_console_message'].includes(args.tool)) {
+            inst.startTabUsed = true;
+          }
           if (def.browser && args.tool === 'new_page') {
             const r = await newPageInWindow(inst, mcp, args.arguments || {}, sec * 1000);
             if (r) return r;
@@ -710,6 +731,27 @@ function readBody(req) {
   });
 }
 
+function endOwner(owner) {
+  if (closingOwners.has(owner)) return closingOwners.get(owner);
+  if (!owner || endedOwners.has(owner)) return Promise.resolve(0);
+  const closing = (async () => {
+    endedOwners.set(owner, Date.now());
+    rpcOwners.delete(owner);
+    heartbeats.delete(owner);
+    const connection = connections.get(owner);
+    connections.delete(owner);
+    connection?.end();
+    // A cold backend can finish connecting after its client has already exited.
+    await Promise.allSettled([...pending.entries()].filter(([key]) => key.split('|')[1] === owner).map(([, p]) => p));
+    const mine = [...instances.values()].filter(i => i.serial && i.owner === owner);
+    await Promise.allSettled(mine.map(i => closeInstance(i, 'session ended')));
+    log('session.end', { owner, stopped: mine.length });
+    return mine.length;
+  })().finally(() => closingOwners.delete(owner));
+  closingOwners.set(owner, closing);
+  return closing;
+}
+
 const httpServer = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://127.0.0.1');
@@ -733,25 +775,42 @@ const httpServer = http.createServer(async (req, res) => {
     if (url.pathname === '/rpc' && req.method === 'POST') {
       const body = (await readBody(req)) || {};
       const ctx = ownerCtx(String(body.owner || 'anonymous'));
+      if (endedOwners.has(ctx.owner)) return sendJson(res, 200, textResult('Gateway error: session has ended', true));
       rpcOwners.set(ctx.owner, Date.now());
       return sendJson(res, 200, await runMeta(String(body.name), body.arguments || {}, ctx));
     }
-    // Sent by a shim every heartbeatSec while its client runs: keeps the session's per-session instances.
-    if (url.pathname === '/session/alive' && req.method === 'POST') {
+    // The OS closes this socket even if the shim is killed without running its exit handler. Unlike a
+    // heartbeat lease, a live loopback connection does not expire while the computer sleeps.
+    if (url.pathname === '/session/connect' && req.method === 'POST') {
       const owner = String(((await readBody(req)) || {}).owner || '');
-      if (owner) heartbeats.set(owner, Date.now());
+      if (!owner) return sendJson(res, 400, { error: 'owner is required' });
+      await closingOwners.get(owner);
+      if (res.destroyed) return;
+      const old = connections.get(owner);
+      endedOwners.delete(owner);
+      connections.set(owner, res);
+      res.on('close', () => {
+        if (connections.get(owner) === res) endOwner(owner).catch(err => pushError('session.end', err));
+      });
+      req.socket.setTimeout(0);
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+      res.write(': connected\n\n');
+      old?.end(); // a replaced connection must not end the new one
+      return;
+    }
+    // Compatibility for shims predating persistent session connections.
+    if (url.pathname === '/session/alive' && req.method === 'POST') {
+      const body = (await readBody(req)) || {};
+      const owner = String(body.owner || '');
+      const ttl = Number(body.ttlMs);
+      if (owner && !endedOwners.has(owner)) heartbeats.set(owner, Date.now() + (Number.isFinite(ttl) && ttl > 0 ? ttl : ALIVE_MS));
       return sendJson(res, 200, { ok: true });
     }
     // Sent by a shim when its client goes away: stop that session's per-session instances (and close their
     // browser windows) now instead of after the idle timeout. Shared instances keep running.
     if (url.pathname === '/session/end' && req.method === 'POST') {
       const owner = String(((await readBody(req)) || {}).owner || '');
-      rpcOwners.delete(owner);
-      heartbeats.delete(owner);
-      const mine = [...instances.values()].filter(i => owner && i.key.split('|')[1] === owner);
-      await Promise.allSettled(mine.map(i => closeInstance(i, 'session ended')));
-      log('session.end', { owner, stopped: mine.length });
-      return sendJson(res, 200, { ok: true, stopped: mine.length });
+      return sendJson(res, 200, { ok: true, stopped: await endOwner(owner) });
     }
     if (url.pathname !== '/mcp') return sendJson(res, 404, { error: 'not found' });
 
@@ -798,11 +857,11 @@ function sweepOutputs() {
   }
 }
 
-// A per-session instance whose shim still reports in belongs to a running client: its browser window and
+// A per-session instance with a live connection or legacy heartbeat belongs to a running client: its window and
 // other state stay however long the agent works on something else (up to sessionMaxIdleMinutes, if set).
 // Clients without heartbeats (HTTP sessions, the CLI, older shims) keep the plain idle timeout.
 function sessionAlive(inst, now) {
-  return inst.serial && now - (heartbeats.get(inst.owner) ?? 0) < ALIVE_MS;
+  return inst.serial && (connections.has(inst.owner) || now < (heartbeats.get(inst.owner) ?? 0));
 }
 
 function reapable(inst, now) {
@@ -820,7 +879,8 @@ setInterval(() => {
     if (now - s.lastSeen > 12 * 3600_000) { sessions.delete(id); s.transport.close().catch(() => {}); }
   }
   for (const [owner, seen] of rpcOwners) if (now - seen > 12 * 3600_000) rpcOwners.delete(owner);
-  for (const [owner, seen] of heartbeats) if (now - seen > ALIVE_MS) heartbeats.delete(owner);
+  for (const [owner, expires] of heartbeats) if (now >= expires) heartbeats.delete(owner);
+  for (const [owner, ended] of endedOwners) if (now - ended > 12 * 3600_000) endedOwners.delete(owner);
 }, Math.min(60_000, Math.max(1_000, IDLE_MS / 2))).unref();
 setInterval(sweepOutputs, 3600_000).unref();
 

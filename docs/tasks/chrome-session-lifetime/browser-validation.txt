@@ -1,0 +1,27 @@
+Isolated gateway 62984, Chrome 62985, profile C:\mcp\mcp-shared-gateway\.tmp\isolated-browser-4Vqxwn\profile
+ok   A: navigate to data:text/html,%3Ctitle%3Egateway-23396-A%3C%2Ftitle%3E%3Cmain%3EA%3C%2Fmain%3E
+ok   B: navigate to data:text/html,%3Ctitle%3Egateway-23396-B%3C%2Ftitle%3E%3Cmain%3EB%3C%2Fmain%3E
+ok   A: still on its own page
+ok   A: screenshot C:\mcp\mcp-shared-gateway\.tmp\browser-check-bY45KV\A.png
+ok   B: still on its own page
+ok   B: screenshot C:\mcp\mcp-shared-gateway\.tmp\browser-check-bY45KV\B.png
+ok   sessions use different windows (1650065540, 1650065542)
+ok   C: new_page data:text/html,%3Ctitle%3Egateway-23396-C1%3C%2Ftitle%3E%3Cmain%3EC1%3C%2Fmain%3E
+ok   C: first new_page used the blank start tab (window has ["data:text/html,%3Ctitle%3Egateway-23396-C1%3C%2Ftitle%3E%3Cmain%3EC1%3C%2Fmain%3E"])
+ok   C: new_page data:text/html,%3Ctitle%3Egateway-23396-C2%3C%2Ftitle%3E%3Cmain%3EC2%3C%2Fmain%3E
+ok   C: second new_page opened a tab next to it (window has ["data:text/html,%3Ctitle%3Egateway-23396-C2%3C%2Ftitle%3E%3Cmain%3EC2%3C%2Fmain%3E","data:text/html,%3Ctitle%3Egateway-23396-C1%3C%2Ftitle%3E%3Cmain%3EC1%3C%2Fmain%3E"])
+ok   C: its own window
+ok   C: the new tab is selected
+ok   D: found its selected start page
+ok   D: write content without navigating
+ok   D: open another page
+ok   D: new_page preserves the used start page
+ok   D: start-page content is intact
+ok   E: open a page for the blocked-script check
+ok   E: installed a delayed busy script in the disposable page
+ok   E: blocked tab creation reports an error
+ok   E: failed creation did not fall back to another session window
+ok   shim reached the gateway (pid 23348)
+ok   gateway survives when the client kills the shim tree
+ok   shim reconnects after a gateway restart (23348 -> 10208)
+ok   shim reconnects after a gateway restart started by another client (10208 -> 61092)

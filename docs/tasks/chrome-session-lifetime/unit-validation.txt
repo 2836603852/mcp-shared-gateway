@@ -1,0 +1,38 @@
+
+> mcp-shared-gateway@0.3.0 test C:\mcp\mcp-shared-gateway
+> node --test tests/*.test.mjs
+
+✔ servers.example.json is valid and every server has a scope and a transport (0.7844ms)
+✔ defaults: outputs and work dir under the state dir, built-in instructions plus hints (93.5877ms)
+✔ outputDir/workDir relative to the config file; instructionsFile replaces the built-in text (90.8821ms)
+✔ instructions as an array of lines; ${CWD}/${CLIENT} are left for the gateway, other names are substituted (89.4905ms)
+✔ ${NAME} comes from state/secrets.json before the environment; unknown names stay as they are (90.594ms)
+✔ heartbeat delays stay within the Node timer range and invalid values use the default (451.3804ms)
+✔ shared server: two sessions use one backend process (783.3966ms)
+✔ owner server: each session gets its own process, reused across its calls (548.6246ms)
+✔ shim: answers initialize and tools/list locally, forwards calls to the gateway (123.8756ms)
+✔ backend env: client alias via clientEnv, dropEnv and client prefixes removed, the rest kept (286.5581ms)
+✔ long text results are written to gateway.outputDir (9.8463ms)
+✔ cwd "key": one instance per directory, ${CWD} filled into cwdArgs (541.7437ms)
+✔ reset stops the session's instance together with the processes it started (537.891ms)
+✔ two timeouts in a row restart a per-session instance; shared instances are kept (5118.823ms)
+✔ when a shim exits, its per-session instances stop; other sessions keep theirs (928.3278ms)
+✔ a running shim keeps its per-session instance past the idle timeout; a session without heartbeats does not (7080.5808ms)
+✔ a held session survives a forward clock jump and a different shim heartbeat setting (5180.8971ms)
+✔ hard-killing a shim closes its session before the ordinary idle timeout (702.5287ms)
+✔ replacing a session connection does not close its instances; closing the replacement does (574.5196ms)
+✔ a session ending during backend startup leaves no late backend process (1716.852ms)
+✔ legacy heartbeats remain supported and a supplied lease is independent of gateway heartbeatSec (5053.2244ms)
+✔ reconnecting during cold-start cleanup cannot close the replacement instance (2179.5702ms)
+✔ a shim whose client died without closing its stdin ends its session (1521.9805ms)
+✔ cross-server search and unknown servers (8.3451ms)
+﹣ token file is private to its owner (0.0845ms) # POSIX permissions
+✔ idle backends are stopped (3790.3517ms)
+ℹ tests 26
+ℹ suites 0
+ℹ pass 25
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 1
+ℹ todo 0
+ℹ duration_ms 37591.6035

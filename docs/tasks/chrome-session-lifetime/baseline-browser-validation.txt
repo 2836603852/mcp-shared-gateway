@@ -1,0 +1,43 @@
+Isolated gateway 26351, Chrome 26352, profile C:\mcp\mcp-shared-gateway\.tmp\isolated-browser-orXSso\profile
+ok   A: navigate to data:text/html,%3Ctitle%3Egateway-8128-A%3C%2Ftitle%3E%3Cmain%3EA%3C%2Fmain%3E
+ok   B: navigate to data:text/html,%3Ctitle%3Egateway-8128-B%3C%2Ftitle%3E%3Cmain%3EB%3C%2Fmain%3E
+ok   A: still on its own page
+ok   A: screenshot C:\mcp\mcp-shared-gateway\.tmp\review-baseline\.tmp\browser-check-un0cL6\A.png
+ok   B: still on its own page
+ok   B: screenshot C:\mcp\mcp-shared-gateway\.tmp\review-baseline\.tmp\browser-check-un0cL6\B.png
+ok   sessions use different windows (672482667, 672482669)
+ok   C: new_page data:text/html,%3Ctitle%3Egateway-8128-C1%3C%2Ftitle%3E%3Cmain%3EC1%3C%2Fmain%3E
+ok   C: first new_page used the blank start tab (window has ["data:text/html,%3Ctitle%3Egateway-8128-C1%3C%2Ftitle%3E%3Cmain%3EC1%3C%2Fmain%3E"])
+ok   C: new_page data:text/html,%3Ctitle%3Egateway-8128-C2%3C%2Ftitle%3E%3Cmain%3EC2%3C%2Fmain%3E
+ok   C: second new_page opened a tab next to it (window has ["data:text/html,%3Ctitle%3Egateway-8128-C2%3C%2Ftitle%3E%3Cmain%3EC2%3C%2Fmain%3E","data:text/html,%3Ctitle%3Egateway-8128-C1%3C%2Ftitle%3E%3Cmain%3EC1%3C%2Fmain%3E"])
+ok   C: its own window
+ok   C: the new tab is selected
+ok   D: found its selected start page
+ok   D: write content without navigating
+ok   D: open another page
+FAIL D: new_page preserves the used start page
+FAIL D: start-page content is intact
+ok   E: open a page for the blocked-script check
+ok   E: installed a delayed busy script in the disposable page
+FAIL E: blocked tab creation reports an error
+FAIL E: failed creation did not fall back to another session window
+Failure evidence kept in C:\mcp\mcp-shared-gateway\.tmp\isolated-browser-orXSso
+node:internal/errors:998
+  const err = new Error(message);
+              ^
+
+Error: Command failed: C:\Program Files\nodejs\node.exe C:\mcp\mcp-shared-gateway\.tmp\review-baseline\tests\manual\browser-sessions.mjs
+
+    at genericNodeError (node:internal/errors:998:15)
+    at wrappedFn (node:internal/errors:543:14)
+    at ChildProcess.exithandler (node:child_process:417:12)
+    at ChildProcess.emit (node:events:508:28)
+    at maybeClose (node:internal/child_process:1085:16)
+    at ChildProcess._handle.onexit (node:internal/child_process:304:5) {
+  code: 1,
+  killed: false,
+  signal: null,
+  cmd: 'C:\\Program Files\\nodejs\\node.exe C:\\mcp\\mcp-shared-gateway\\.tmp\\review-baseline\\tests\\manual\\browser-sessions.mjs'
+}
+
+Node.js v25.2.1
